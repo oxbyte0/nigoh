@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-30
+
+### Added
+
+- `--add-hosts`: after a host's service scan, extracts domain names from LDAP/TLS/HTTP-redirect
+  output and offers to append them to `/etc/hosts` (asks first, `sudo tee`).
+- `--misconfig`: checks open ports for common misconfigurations — anon FTP, null-session SMB/RPC
+  enum, NFS exports, default/empty creds on MySQL/MSSQL/Redis/Mongo/CouchDB/Cassandra, open
+  VNC/X11/Modbus/Docker, HTTP default accounts. Rate-capped; findings surface in `SUMMARY.md`.
+
 ## [1.1.0] - 2026-07-30
 
 ### Added
@@ -65,6 +75,7 @@ profiles in `examples/`.
 
 `--diff`, `--webhook`, consolidated `SUMMARY.md`, plain-text run journal.
 
-[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/oxbyte0/nigoh/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/oxbyte0/nigoh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxbyte0/nigoh/releases/tag/v1.0.0

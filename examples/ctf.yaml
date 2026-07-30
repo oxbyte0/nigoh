@@ -14,6 +14,15 @@ mode: ctf
 # worth leaving on by default here.
 cve: true
 
+# AD boxes dump domain names in LDAP/TLS output that resolve to nothing
+# until they're in /etc/hosts. Worth it on CTF/HTB targets; always asks first.
+add_hosts: true
+
+# Anon FTP, null-session SMB, default creds — common on CTF boxes, cheap
+# to check, worth leaving on here even though a few of the scripts are
+# NSE-intrusive (single-attempt auth checks, not brute force).
+misconfig: true
+
 # Skip these unless the box specifically needs them — they cost time:
 udp: false                     # only if you suspect a UDP-only service (SNMP, DNS, TFTP)
 vuln: false                    # nmap's vuln-category NSE scripts, broader and slower than --cve

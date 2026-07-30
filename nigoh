@@ -65,6 +65,8 @@ ${C_WHITE}SCAN CONTROL${C_RESET}
       ${C_WHITE}--cve${C_RESET}             match service versions against known CVEs  ${C_GRAY}(needs vulners/vulscan NSE)${C_RESET}
       ${C_WHITE}--ot${C_RESET}              ICS/OT-safe discovery: Modbus, S7, BACnet
       ${C_WHITE}--sec-headers${C_RESET}     check HTTP responses for HSTS/CSP/X-Frame-Options etc.
+      ${C_WHITE}--add-hosts${C_RESET}       suggest /etc/hosts entries from found domains  ${C_GRAY}(asks first)${C_RESET}
+      ${C_WHITE}--misconfig${C_RESET}       check common misconfigs: anon FTP, null SMB/RPC, default creds  ${C_GRAY}(intrusive)${C_RESET}
 
 ${C_WHITE}EVASION${C_RESET}
       ${C_WHITE}--idle-zombie${C_RESET} <host>  blind idle scan through a zombie host
@@ -112,8 +114,8 @@ save_state() {
     local tmp; tmp=$(mktemp "$OUTDIR/.state.XXXXXX") || die "failed to create state file in $OUTDIR (disk full or permission denied?)"
     { printf 'MODE=%q\nTARGET=%q\nCURRENT_PHASE=%q\n' "$MODE" "$TARGET" "$CURRENT_PHASE"
       printf 'PHASE_DISCOVERY_DONE=%q\nPHASE_SWEEP_DONE=%q\n' "$PHASE_DISCOVERY_DONE" "$PHASE_SWEEP_DONE"
-      printf 'SERVICE_DONE_HOSTS=%q\nEVASION_DONE_HOSTS=%q\nVULN_DONE_HOSTS=%q\n' \
-             "$SERVICE_DONE_HOSTS" "$EVASION_DONE_HOSTS" "$VULN_DONE_HOSTS"
+      printf 'SERVICE_DONE_HOSTS=%q\nEVASION_DONE_HOSTS=%q\nVULN_DONE_HOSTS=%q\nMISCONFIG_DONE_HOSTS=%q\n' \
+             "$SERVICE_DONE_HOSTS" "$EVASION_DONE_HOSTS" "$VULN_DONE_HOSTS" "$MISCONFIG_DONE_HOSTS"
       printf 'PHASE_UDP_DONE=%q\nPHASE_OS_DONE=%q\nPHASE_BADSUM_DONE=%q\n' \
              "$PHASE_UDP_DONE" "$PHASE_OS_DONE" "$PHASE_BADSUM_DONE"
       printf 'PHASE_DEFENSE_DONE=%q\nDEFENSE_DETECTED=%q\n' "$PHASE_DEFENSE_DONE" "$DEFENSE_DETECTED"
@@ -128,8 +130,8 @@ save_state() {
       printf 'ALLOW_HUGE_SCOPE=%q\nCHUNK_MODE=%q\nCHUNK_PREFIX=%q\nCHUNK_LIST=%q\nCHUNK_DONE_HOSTS=%q\n' \
              "$ALLOW_HUGE_SCOPE" "$CHUNK_MODE" "$CHUNK_PREFIX" "$CHUNK_LIST" "$CHUNK_DONE_HOSTS"
       printf 'INTERFACE=%q\nCONFIG_FILE=%q\nQUIET=%q\n' "$INTERFACE" "$CONFIG_FILE" "$QUIET"
-      printf 'TTL=%q\nPROXY_URL=%q\nDO_SECHEADERS=%q\nRAND_DATA_LEN=%q\nDEBUG=%q\n' \
-             "$TTL" "$PROXY_URL" "$DO_SECHEADERS" "$RAND_DATA_LEN" "$DEBUG"
+      printf 'TTL=%q\nPROXY_URL=%q\nDO_SECHEADERS=%q\nRAND_DATA_LEN=%q\nDEBUG=%q\nDO_ADD_HOSTS=%q\nDO_MISCONFIG=%q\n' \
+             "$TTL" "$PROXY_URL" "$DO_SECHEADERS" "$RAND_DATA_LEN" "$DEBUG" "$DO_ADD_HOSTS" "$DO_MISCONFIG"
     } > "$tmp"
     mv -f "$tmp" "$OUTDIR/.nigoh_state"
 }
@@ -322,6 +324,48 @@ mark_host_done() {
     save_state
 }
 
+# pulls domain names out of a service scan's LDAP/SSL output and offers to
+# add them to /etc/hosts, main domain first, subdomains on the same line
+suggest_hosts_entries() {
+    local host="$1"
+    local nmap_file="service/$host.nmap"
+    [[ -f "$nmap_file" ]] || return 0
+    local main_domain found d
+    main_domain=$(grep -oP '(?<=Domain: )[^,)]+' "$nmap_file" 2>/dev/null | sort -u | head -n1) || true
+    found=$({ grep -oP 'commonName=\K\S+' "$nmap_file" 2>/dev/null
+              grep -oP 'DNS:\K[^,\s]+' "$nmap_file" 2>/dev/null
+              grep -oP '(?:Requested resource was|Did not follow redirect to) \K\S+' "$nmap_file" 2>/dev/null \
+                  | grep -oP '(?<=://)[^/:\s]+'
+              true; } | sort -u)
+
+    local -a names=()
+    [[ -n "$main_domain" && "$main_domain" =~ ^[A-Za-z0-9.-]+$ ]] && names+=("$main_domain")
+    while IFS= read -r d; do
+        [[ -z "$d" || "$d" == "$main_domain" ]] && continue
+        [[ "$d" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && continue
+        [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] && names+=("$d")
+    done <<< "$found"
+    [[ "${#names[@]}" -eq 0 ]] && return 0
+
+    local -a to_add=()
+    for d in "${names[@]}"; do
+        grep -qE "[[:space:]]${d//./\\.}([[:space:]]|\$)" /etc/hosts 2>/dev/null || to_add+=("$d")
+    done
+    [[ "${#to_add[@]}" -eq 0 ]] && return 0
+
+    warn "domain names found for $host: ${to_add[*]}"
+    if [[ "${NIGOH_DRYRUN:-0}" == 1 ]]; then
+        log "(dryrun) would prompt to add: $host ${to_add[*]}"
+        return 0
+    fi
+    [[ -t 0 ]] || { warn "not an interactive terminal, skipping /etc/hosts prompt"; return 0; }
+    read -rp "add \"$host ${to_add[*]}\" to /etc/hosts? [y/N] " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        printf '%s %s\n' "$host" "${to_add[*]}" | sudo tee -a /etc/hosts >/dev/null
+        log "added to /etc/hosts: $host ${to_add[*]}"
+    fi
+}
+
 is_cidr() {
     # bail on any letter first, or a hostname like db-01 false-positives
     [[ "$1" =~ [a-zA-Z] ]] && return 1
@@ -468,6 +512,7 @@ run_chunk_child() {
     [[ -n "$TTL" ]] && child_args+=(--ttl "$TTL")
     [[ -n "$PROXY_URL" ]] && child_args+=(--proxy "$PROXY_URL")
     [[ "$DO_SECHEADERS" == 1 ]] && child_args+=(--sec-headers)
+    [[ "$DO_MISCONFIG" == 1 ]] && child_args+=(--misconfig)
     [[ "$QUIET" == 1 ]] && child_args+=(-q)
     NIGOH_CHUNK_CHILD=1 "$0" -t "$chunk" -o "$OUTDIR/$chunk_dir" "${child_args[@]}" || warn "chunk $chunk exited non-zero"
 }
@@ -540,6 +585,8 @@ load_config_if_given() {
     v=$(yq -r '.ttl // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && TTL="$v"
     v=$(yq -r '.proxy // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && PROXY_URL="$v"
     v=$(yq -r '.sec_headers // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_SECHEADERS=1
+    v=$(yq -r '.add_hosts // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_ADD_HOSTS=1
+    v=$(yq -r '.misconfig // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_MISCONFIG=1
     return 0
 }
 
@@ -589,7 +636,7 @@ MODE_EXPLICIT=0; KEEP_RUNS=20
 IDLE_ZOMBIE=""; DO_FWMAP=0; PARANOID=0; DO_OT=0; BASELINE_DIR=""; DO_CVE=0; WEBHOOK_URL=""
 ALLOW_HUGE_SCOPE=0; CHUNK_MODE=0; CHUNK_PREFIX=""; CHUNK_LIST=""; CHUNK_DONE_HOSTS=""
 INTERFACE=""; CONFIG_FILE=""; QUIET=0
-TTL=""; PROXY_URL=""; DO_SECHEADERS=0; RAND_DATA_LEN=""
+TTL=""; PROXY_URL=""; DO_SECHEADERS=0; RAND_DATA_LEN=""; DO_ADD_HOSTS=0; DO_MISCONFIG=0
 HIST_DIR="$HOME/.nigoh"
 CHILD_PID=""; CURRENT_PHASE="init"
 
@@ -630,6 +677,8 @@ while [[ $# -gt 0 ]]; do
         --ttl) TTL="$2"; shift 2 ;;
         --proxy) PROXY_URL="$2"; shift 2 ;;
         --sec-headers) DO_SECHEADERS=1; shift ;;
+        --add-hosts) DO_ADD_HOSTS=1; shift ;;
+        --misconfig) DO_MISCONFIG=1; shift ;;
         -q|--quiet) QUIET=1; shift ;;
         --list) mkdir -p "$HIST_DIR"; cat "$HIST_DIR/history.log" 2>/dev/null || true; exit 0 ;;
         -h|--help) print_help; exit 0 ;;
@@ -690,10 +739,10 @@ $(list_interfaces)"
         CHUNK_LIST=$(cidr_to_24_chunks "$TARGET" | tr '\n' ' ') || true
         CHUNK_LIST="${CHUNK_LIST% }"
     else
-        mkdir -p "$OUTDIR"/{discovery,sweep,service,evasion,vuln,udp,os}
+        mkdir -p "$OUTDIR"/{discovery,sweep,service,evasion,vuln,misconfig,udp,os}
     fi
     PHASE_DISCOVERY_DONE=0; PHASE_SWEEP_DONE=0
-    SERVICE_DONE_HOSTS=""; EVASION_DONE_HOSTS=""; VULN_DONE_HOSTS=""
+    SERVICE_DONE_HOSTS=""; EVASION_DONE_HOSTS=""; VULN_DONE_HOSTS=""; MISCONFIG_DONE_HOSTS=""
     PHASE_UDP_DONE=0; PHASE_OS_DONE=0; PHASE_BADSUM_DONE=0
     PHASE_DEFENSE_DONE=0; DEFENSE_DETECTED=""
     PHASE_FWMAP_DONE=0; PHASE_OT_DONE=0
@@ -918,6 +967,7 @@ while read -r host; do
         run_nmap "${SERVICE_ARGS[@]}" -Pn -p"$ports" -oA "service/$host" "$host" || true
         all_ports_filtered "service/$host.nmap" && warn "$host: still filtered after retry — block may outlast this run, re-run service scan later with: nmap ${SERVICE_ARGS[*]} -Pn -p$ports $host"
     fi
+    [[ "$DO_ADD_HOSTS" == 1 ]] && suggest_hosts_entries "$host"
     mark_host_done SERVICE_DONE_HOSTS "$host"
     journal_append "phase: service $host"
 done < live_hosts.txt
@@ -963,6 +1013,31 @@ if [[ "$DO_UDP" == 1 && "$PHASE_UDP_DONE" != 1 ]]; then
               -iL live_hosts.txt -oA udp/top200 || true
     PHASE_UDP_DONE=1
     save_state; journal_append "phase: udp"
+fi
+
+# phase 6b: common misconfig checks (opt-in, some scripts are NSE-intrusive, rate-capped)
+CURRENT_PHASE="misconfig"
+if [[ "$DO_MISCONFIG" == 1 ]]; then
+    misconfig_scripts="ftp-anon,smb-enum-shares,smb-enum-users,rpcinfo,nfs-showmount,"
+    misconfig_scripts+="mysql-empty-password,ms-sql-empty-password,redis-info,mongodb-info,"
+    misconfig_scripts+="memcached-info,couchdb-databases,cassandra-info,rdp-enum-encryption,"
+    misconfig_scripts+="telnet-encryption,vnc-info,x11-access,modbus-discover,docker-version,"
+    misconfig_scripts+="ajp-headers,pjl-ready-message,http-default-accounts"
+    while read -r host; do
+        [[ -z "$host" ]] && continue
+        host_in_list "$MISCONFIG_DONE_HOSTS" "$host" && continue
+        ports="${PORTS_OVERRIDE:-$(open_ports_for "$host")}"
+        if [[ -n "$ports" ]]; then
+            log "phase6b: misconfig checks $host"
+            run_nmap -Pn -p"$ports" --script "$misconfig_scripts" \
+                      --script-timeout 90s --max-rate 300 -oA "misconfig/$host" "$host" || true
+        fi
+        if [[ "$DO_UDP" == 1 ]] && grep -qE "Host: ${host//./\\.} .*161/open/udp" udp/top200.gnmap 2>/dev/null; then
+            run_nmap -sU -Pn -p161 --script snmp-info --script-timeout 30s -oA "misconfig/${host}_snmp" "$host" || true
+        fi
+        mark_host_done MISCONFIG_DONE_HOSTS "$host"
+        journal_append "phase: misconfig $host"
+    done < live_hosts.txt
 fi
 
 # phase 7: OS fingerprint + path
@@ -1021,6 +1096,14 @@ CURRENT_PHASE="report"
             [[ -e "$f" ]] || continue
             hdrs=$(awk '/^\| http-security-headers:/{f=1} f{ if ($0 !~ /^\|/) exit; print }' "$f")
             [[ -n "$hdrs" ]] && { echo "### $(basename "${f%.nmap}")"; echo "$hdrs"; echo; }
+        done
+    fi
+    if [[ "$DO_MISCONFIG" == 1 ]]; then
+        echo "## Misconfigs found"
+        for f in misconfig/*.nmap; do
+            [[ -e "$f" ]] || continue
+            findings=$(grep -B1 -E '^\|' "$f" | grep -vE '^--$') || true
+            [[ -n "$findings" ]] && { echo "### $(basename "${f%.nmap}")"; echo '```'; echo "$findings"; echo '```'; echo; }
         done
     fi
 } > SUMMARY.md

@@ -6,7 +6,7 @@ This policy covers vulnerabilities in `nigoh` itself — the wrapper script — 
 
 - Command injection via unsanitized target, port, or file-path input
 - Unsafe handling of temporary files or the state/journal files it writes
-- Privilege-escalation issues related to its use of `sudo` (`--masscan`)
+- Privilege-escalation issues related to its use of `sudo` (`--masscan`, `--add-hosts`)
 - Logic errors that cause the tool to scan or exclude the wrong hosts
 
 It does **not** cover vulnerabilities in `nmap`, `masscan`, `yq`, or any NSE script `nigoh` invokes.
@@ -21,6 +21,15 @@ code-execution vector. It is, however, a data-integrity one: running `nigoh` ins
 attacker controls could silently redirect the scan target, or point `--webhook` at an attacker's
 URL to exfiltrate results. Review a directory's contents, including hidden config files, before
 running `nigoh` there without an explicit `-t`/`--target` overriding whatever the config supplies.
+
+## Known Risk: `--misconfig` Performs Live Auth Attempts
+
+Several scripts run by `--misconfig` (`mysql-empty-password`, `ms-sql-empty-password`,
+`http-default-accounts`, `smb-enum-shares`/`smb-enum-users`) are nmap NSE-`intrusive`, not `safe` —
+they make a single live authentication attempt (empty/default credentials) or null-session
+enumeration against the target rather than just reading a banner. This is standard misconfiguration
+discovery, not brute forcing, but it is active interaction with the target's auth layer and should
+only be run against systems you're authorized to test in that manner.
 
 ## Supported Versions
 

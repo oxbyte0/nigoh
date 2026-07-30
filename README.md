@@ -151,6 +151,8 @@ issue a full-rate blind sweep against every address in the range.
 | `--cve` | — | Match detected service versions against known CVEs (requires `vulners`/`vulscan`) |
 | `--ot` | — | ICS/OT-safe discovery profile: Modbus, S7, BACnet |
 | `--sec-headers` | — | Checks discovered HTTP(S) services for security-relevant response headers (HSTS, CSP, X-Frame-Options, etc.) via nmap's bundled `http-security-headers` script |
+| `--misconfig` | — | Checks open ports for common misconfigurations — anon FTP, null-session SMB/RPC enum, NFS exports, default/empty creds on MySQL/MSSQL/Redis/Mongo/etc., open VNC/X11/Modbus/Docker, HTTP default accounts. Rate-capped; several of the scripts are NSE-`intrusive` (single-attempt auth checks) |
+| `--add-hosts` | — | After each host's service scan, extracts domain names from LDAP/TLS/HTTP-redirect output and offers to append them to `/etc/hosts` (`sudo tee`, asks first) |
 
 ### Evasion
 
@@ -282,8 +284,8 @@ Every phase writes a checkpoint to `.nigoh_state` in the run directory immediate
 This checkpoint includes **every flag from the original invocation** — target, mode, port
 overrides, exclusions, interface, and all opt-in flags (`--udp`, `--vuln`, `--cve`, `--paranoid`,
 `--firewall-map`, `--ot`, `--idle-zombie`, `--diff`, `--webhook`, `--mac`, `--keep-runs`,
-`--masscan`, `--recurse-pivot`, `--allow-huge-scope`, `--ttl`, `--proxy`, `--sec-headers`) — not
-merely the target and mode.
+`--masscan`, `--recurse-pivot`, `--allow-huge-scope`, `--ttl`, `--proxy`, `--sec-headers`,
+`--misconfig`, `--add-hosts`) — not merely the target and mode.
 
 Consequently:
 
