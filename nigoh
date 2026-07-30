@@ -275,7 +275,7 @@ throttle_for_defense() {
 }
 
 boost_for_no_defense() {
-    scale_arg_value "$1" --min-rate mul 3 0 20000
+    scale_arg_value "$1" --min-rate mul 2 0 20000
     scale_arg_value "$1" --version-intensity mul 2 0 9
 }
 
@@ -330,9 +330,24 @@ is_cidr() {
 
 open_ports_for() {
     # gnmap records the resolved IP in Host:, hostname trails in parens
-    local h="${1//./\\.}"
-    grep -E "^Host: ($h |[0-9.]+ \\($h\\))" sweep/tcp_full.gnmap 2>/dev/null \
-        | grep -oP '\d+/open' | cut -d/ -f1 | sort -n -u | paste -sd, - || true
+    local h="${1//./\\.}" recovered_file
+    recovered_file="sweep/recovered_$(printf '%s' "$1" | tr '.' '_').txt"
+    {
+        grep -E "^Host: ($h |[0-9.]+ \\($h\\))" sweep/tcp_full.gnmap 2>/dev/null \
+            | grep -oP '\d+/open' | cut -d/ -f1
+        [[ -f "$recovered_file" ]] && cat "$recovered_file"
+    } | sort -n -u | paste -sd, - || true
+}
+
+# ports open in the probe but missing from the sweep were rate-limited, not closed
+sweep_regression_for() {
+    local host="$1" probe_open sweep_open
+    [[ -f discovery/defense_probe.nmap ]] || return 0
+    probe_open=$(grep -E '^[0-9]+/tcp +open' discovery/defense_probe.nmap 2>/dev/null \
+                 | grep -oE '^[0-9]+' | sort -un) || true
+    [[ -z "$probe_open" ]] && return 0
+    sweep_open=$(open_ports_for "$host" | tr ',' '\n' | sort -un)
+    comm -23 <(printf '%s\n' "$probe_open") <(printf '%s\n' "$sweep_open") 2>/dev/null || true
 }
 
 detect_pivot_subnets() {
@@ -761,9 +776,13 @@ if [[ "$MODE" != "stealth" ]]; then
         save_state; journal_append "phase: defense_probe detected=$DEFENSE_DETECTED"
     fi
     if [[ "$DEFENSE_DETECTED" == 1 ]]; then
-        throttle_for_defense SWEEP_ARGS
-        throttle_for_defense SERVICE_ARGS
         COOLDOWN=$(( COOLDOWN * 2 ))
+        if [[ "$MODE" == "ctf" ]]; then
+            warn "defense probe flagged likely filtering — ctf mode keeps full scan speed by design (extra cooldown still applied); pass --paranoid for full caution"
+        else
+            throttle_for_defense SWEEP_ARGS
+            throttle_for_defense SERVICE_ARGS
+        fi
     elif [[ "$DEFENSE_DETECTED" == 0 ]]; then
         boost_for_no_defense SWEEP_ARGS
         boost_for_no_defense SERVICE_ARGS
@@ -839,6 +858,30 @@ elif [[ "$PHASE_SWEEP_DONE" != 1 ]]; then
     run_nmap "${SWEEP_ARGS[@]}" "${EXCLUDE_ARGS[@]}" -iL live_hosts.txt -oA sweep/tcp_full || true
     PHASE_SWEEP_DONE=1
     save_state; journal_append "phase: sweep"
+
+    # only the probed host has a baseline to check regression against
+    probe_host="$(head -n1 live_hosts.txt)"
+    missing_ports="$(sweep_regression_for "$probe_host")"
+    if [[ -n "$missing_ports" ]]; then
+        missing_csv="$(printf '%s' "$missing_ports" | tr '\n' ',' | sed 's/,$//')"
+        warn "$probe_host: port(s) $missing_csv were open during the pre-sweep probe but missing from the sweep — likely rate-limited mid-sweep, not actually closed"
+        DEFENSE_DETECTED=1
+        COOLDOWN=$(( COOLDOWN * 2 ))
+        throttle_for_defense SERVICE_ARGS
+        save_state
+        log "waiting 30s, then re-checking $missing_csv directly"
+        sleep 30
+        recheck_slug="$(printf '%s' "$probe_host" | tr '.' '_')"
+        run_nmap -Pn -p"$missing_csv" -oA "sweep/recheck_$recheck_slug" "$probe_host" || true
+        recovered="$(grep -E '^[0-9]+/tcp +open' "sweep/recheck_$recheck_slug.nmap" 2>/dev/null \
+                     | grep -oE '^[0-9]+' || true)"
+        if [[ -n "$recovered" ]]; then
+            log "$probe_host: still open on recheck ($(printf '%s' "$recovered" | tr '\n' ',' | sed 's/,$//')) — included in the service scan"
+            printf '%s\n' "$recovered" >> "sweep/recovered_$recheck_slug.txt"
+        else
+            warn "$probe_host: recheck confirms $missing_csv is genuinely closed or filtered now"
+        fi
+    fi
 fi
 
 # phase 2b: diff against a prior run (opt-in change detection)

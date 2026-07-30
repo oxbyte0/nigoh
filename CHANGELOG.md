@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-30
+
+### Added
+
+- Post-sweep rate-limit detection: cross-checks the pre-sweep probe's confirmed-open ports against
+  the sweep results, rechecks any that went missing, and folds recovered ports back into the
+  service scan.
+
+### Fixed
+
+- `ctf` mode no longer throttles scan rate when the defense probe detects inspection — that
+  defeated its purpose. It keeps the extra cooldown and the rate-limit check above instead.
+- Boost multiplier reduced from 3x to 2x.
+
 ## [1.0.0] - 2026-07-30
 
 Initial public release.
@@ -51,5 +65,6 @@ profiles in `examples/`.
 
 `--diff`, `--webhook`, consolidated `SUMMARY.md`, plain-text run journal.
 
-[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/oxbyte0/nigoh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxbyte0/nigoh/releases/tag/v1.0.0

@@ -187,31 +187,27 @@ than fixed, so it doesn't itself become a recognizable, constant-size signature 
 
 ## Adaptive Defense Tuning
 
-Before the primary sweep, `nigoh` performs a **badsum differential probe**: a small number of SYN
-packets carrying a deliberately invalid TCP checksum, sent to a handful of common ports.
+Before the sweep, `nigoh` sends a few corrupt-checksum ("badsum") SYN packets to common ports. A
+stateless packet filter still answers them; a stateful firewall or IDS doing real packet
+inspection drops them. This tells `nigoh` whether *deep inspection* is present — it says nothing
+about simple rate/connection limiters, which don't care about checksums at all.
 
-- A packet filter that inspects only IP/TCP header fields without validating the checksum will
-  typically still respond.
-- A stateful firewall or intrusion detection system performing deeper inspection will typically
-  drop the malformed packet silently.
+| Result | `normal`/`fast` | `ctf` |
+|---|---|---|
+| Inspection detected | Rate ÷4, `-T3` cap, retries/version-intensity halved, cooldown doubled | Cooldown doubled only — scan rate stays at full speed by design |
+| No inspection detected | Rate ×2 (capped), version-intensity maxed, cooldown halved | Same |
 
-Based on the ratio of dropped to answered probes, `nigoh` classifies the target and adjusts scan
-parameters automatically:
+`ctf` mode never has its packet rate reduced — that would defeat its purpose. It still gets the
+longer cooldown and the check below.
 
-| Classification | Sweep and service-scan adjustment |
-|---|---|
-| Active inspection detected | Rate divided by 4, timing capped at `-T3`, retries and version intensity halved, scan delay added, inter-phase cooldown doubled |
-| No active inspection detected | Rate multiplied by 3 (capped), version-detection intensity maximized, inter-phase cooldown halved |
+**Rate-limit detection**, the part that actually matters: after the sweep, `nigoh` cross-checks the
+probe's own confirmed-open ports against the sweep's results for that host. A port open during the
+probe but missing from the sweep didn't close in the few seconds between — the sweep itself
+tripped a rate limiter (invisible to the checksum probe above). `nigoh` re-checks that port
+directly after a cooldown and folds it back into the service scan if it's still open, so a
+rate-limited port never silently disappears from the results.
 
-This mechanism exists to prevent a specific and previously observed failure mode: an aggressive
-full-port sweep triggering a target's rate limiter, followed immediately by a service scan that
-misreads the resulting block window as closed ports rather than a transient filtering artifact. A
-mandatory cooldown between the sweep and the service scan, combined with automatic retry logic when
-a service scan unexpectedly reports all-filtered results, closes this gap independently of the
-adaptive probe.
-
-The probe is skipped in `stealth` mode, which already assumes an actively monitored target and is
-tuned accordingly from the outset.
+Skipped entirely in `stealth` mode, which is already tuned for a monitored target from the start.
 
 ## CIDR Sizing and Chunked Scanning
 
