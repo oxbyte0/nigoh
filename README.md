@@ -1,5 +1,7 @@
 # nigoh
 
+![nigoh](main_b.jpg)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell: Bash](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
 [![Requires: nmap](https://img.shields.io/badge/Requires-nmap-informational)](https://nmap.org)
