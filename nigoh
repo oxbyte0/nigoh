@@ -2,8 +2,12 @@
 # shellcheck disable=SC2054  # commas below are nmap port-list syntax inside one arg, not array separators
 set -euo pipefail
 
-# resolved through symlinks so banners/ is found next to the real script
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+NIGOH_VERSION="1.2.0"
+UPDATE_RAW_URL="https://raw.githubusercontent.com/oxbyte0/nigoh/main/nigoh"
+
+# resolved through symlinks so banners/ and self-update find the real script
+REAL_SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
 
 # colors (red/gray/white only, auto-disabled unless BOTH stdout+stderr are a tty, or NO_COLOR set)
 if [[ -t 1 && -t 2 && -z "${NO_COLOR:-}" ]]; then
@@ -87,6 +91,8 @@ ${C_WHITE}ADVANCED${C_RESET}
 ${C_WHITE}UTILITY${C_RESET}
   ${C_WHITE}-q, --quiet${C_RESET}           suppress the startup banner
       ${C_WHITE}--list${C_RESET}            show run history (~/.nigoh/history.log)
+      ${C_WHITE}--update${C_RESET}          check for and install a newer version  ${C_GRAY}(asks first unless auto_update: true)${C_RESET}
+      ${C_WHITE}--version${C_RESET}         print the installed version
   ${C_WHITE}-h, --help${C_RESET}            this text
 
 ${C_WHITE}EXAMPLES${C_RESET}
@@ -517,6 +523,75 @@ run_chunk_child() {
     NIGOH_CHUNK_CHILD=1 "$0" -t "$chunk" -o "$OUTDIR/$chunk_dir" "${child_args[@]}" || warn "chunk $chunk exited non-zero"
 }
 
+# self-update
+version_gt() {
+    [[ "$1" == "$2" ]] && return 1
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+fetch_remote_version() {
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsSL --max-time 5 "$UPDATE_RAW_URL" 2>/dev/null | grep -m1 -oP '^NIGOH_VERSION="\K[^"]+' || true
+}
+
+# rate-limited (once/24h), never blocks or fails the run — notify only unless auto_update is set
+check_for_update() {
+    [[ "${NIGOH_DRYRUN:-0}" == 1 ]] && return 0
+    mkdir -p "$HIST_DIR"
+    local cache="$HIST_DIR/.update_check" now last remote
+    now=$(date +%s)
+    last=$(cat "$cache" 2>/dev/null) || last=0
+    [[ "$(( now - last ))" -lt 86400 ]] && return 0
+    printf '%s\n' "$now" > "$cache"
+    remote=$(fetch_remote_version)
+    [[ -z "$remote" ]] && return 0
+    version_gt "$remote" "$NIGOH_VERSION" || return 0
+    if [[ "$AUTO_UPDATE" == 1 ]]; then
+        log "auto-update: v$NIGOH_VERSION -> v$remote"
+        self_update 1 || warn "auto-update failed, continuing with v$NIGOH_VERSION"
+    else
+        warn "update available: v$NIGOH_VERSION -> v$remote (run 'nigoh --update')"
+    fi
+}
+
+self_update() {
+    local skip_prompt="${1:-0}" remote_src remote_version tmp dir
+    command -v curl >/dev/null 2>&1 || die "self-update needs curl"
+    log "checking for updates..."
+    remote_src=$(curl -fsSL --max-time 10 "$UPDATE_RAW_URL") || die "update check failed: couldn't reach $UPDATE_RAW_URL"
+    remote_version=$(printf '%s' "$remote_src" | grep -m1 -oP '^NIGOH_VERSION="\K[^"]+') || true
+    [[ -n "$remote_version" ]] || die "update check failed: couldn't parse remote version"
+    if ! version_gt "$remote_version" "$NIGOH_VERSION"; then
+        log "already up to date (v$NIGOH_VERSION)"
+        return 0
+    fi
+    log "update available: v$NIGOH_VERSION -> v$remote_version"
+    if [[ "$skip_prompt" != 1 ]]; then
+        if [[ -t 0 ]]; then
+            read -rp "install v$remote_version now? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] || { log "update skipped"; return 0; }
+        else
+            warn "not an interactive terminal, skipping install (set auto_update: true, or run --update from a terminal)"
+            return 0
+        fi
+    fi
+    dir="$(dirname "$REAL_SCRIPT_PATH")"
+    tmp="$(mktemp "${dir}/.nigoh_update.XXXXXX" 2>/dev/null)" || tmp="$(mktemp)"
+    printf '%s' "$remote_src" > "$tmp"
+    if ! bash -n "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        die "update aborted: downloaded script failed syntax check"
+    fi
+    chmod +x "$tmp"
+    if [[ -w "$REAL_SCRIPT_PATH" || -w "$dir" ]]; then
+        mv "$tmp" "$REAL_SCRIPT_PATH"
+    elif ! sudo mv "$tmp" "$REAL_SCRIPT_PATH"; then
+        rm -f "$tmp"
+        die "update failed: couldn't write $REAL_SCRIPT_PATH"
+    fi
+    log "updated to v$remote_version — re-run nigoh to use it"
+}
+
 # validators
 validate_target() { [[ -n "$1" ]] || die "need -t/--target (-h for help)"; }
 validate_mode() { case "$1" in ctf|normal|fast|stealth) ;; *) die "bad mode: $1 (want ctf|normal|fast|stealth)" ;; esac; }
@@ -587,6 +662,7 @@ load_config_if_given() {
     v=$(yq -r '.sec_headers // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_SECHEADERS=1
     v=$(yq -r '.add_hosts // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_ADD_HOSTS=1
     v=$(yq -r '.misconfig // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_MISCONFIG=1
+    v=$(yq -r '.auto_update // false' "$file" 2>/dev/null); [[ "$v" == true ]] && AUTO_UPDATE=1
     return 0
 }
 
@@ -636,7 +712,7 @@ MODE_EXPLICIT=0; KEEP_RUNS=20
 IDLE_ZOMBIE=""; DO_FWMAP=0; PARANOID=0; DO_OT=0; BASELINE_DIR=""; DO_CVE=0; WEBHOOK_URL=""
 ALLOW_HUGE_SCOPE=0; CHUNK_MODE=0; CHUNK_PREFIX=""; CHUNK_LIST=""; CHUNK_DONE_HOSTS=""
 INTERFACE=""; CONFIG_FILE=""; QUIET=0
-TTL=""; PROXY_URL=""; DO_SECHEADERS=0; RAND_DATA_LEN=""; DO_ADD_HOSTS=0; DO_MISCONFIG=0
+TTL=""; PROXY_URL=""; DO_SECHEADERS=0; RAND_DATA_LEN=""; DO_ADD_HOSTS=0; DO_MISCONFIG=0; AUTO_UPDATE=0
 HIST_DIR="$HOME/.nigoh"
 CHILD_PID=""; CURRENT_PHASE="init"
 
@@ -681,10 +757,14 @@ while [[ $# -gt 0 ]]; do
         --misconfig) DO_MISCONFIG=1; shift ;;
         -q|--quiet) QUIET=1; shift ;;
         --list) mkdir -p "$HIST_DIR"; cat "$HIST_DIR/history.log" 2>/dev/null || true; exit 0 ;;
+        --update) self_update "${AUTO_UPDATE:-0}"; exit 0 ;;
+        --version) echo "nigoh v$NIGOH_VERSION"; exit 0 ;;
         -h|--help) print_help; exit 0 ;;
         *) die "unknown arg: $1 (-h for help)" ;;
     esac
 done
+
+[[ "${NIGOH_CHUNK_CHILD:-0}" != 1 ]] && check_for_update
 
 if [[ -n "$RESUME_DIR" ]]; then
     [[ -f "$RESUME_DIR/.nigoh_state" ]] || die "no state file in $RESUME_DIR"

@@ -22,6 +22,17 @@ attacker controls could silently redirect the scan target, or point `--webhook` 
 URL to exfiltrate results. Review a directory's contents, including hidden config files, before
 running `nigoh` there without an explicit `-t`/`--target` overriding whatever the config supplies.
 
+## Known Risk: `--update` Replaces the Running Script from GitHub over HTTPS
+
+`--update` (and the background check with `auto_update: true`) fetches the current `nigoh` script
+from `main` on GitHub over HTTPS and, after a `bash -n` syntax check, overwrites the file the
+`nigoh` command resolves to. There is no signature or independent checksum verification — the
+trust boundary is the HTTPS connection to GitHub and control of the `oxbyte0/nigoh` repository,
+the same trust model as `git pull` or `curl | bash` from this project. The syntax check catches
+corrupted or truncated downloads, not a maliciously-modified but syntactically valid script. Do not
+enable `auto_update: true` in an environment where an unattended silent script replacement from a
+third-party-controlled network path would be unacceptable.
+
 ## Known Risk: `--misconfig` Performs Live Auth Attempts
 
 Several scripts run by `--misconfig` (`mysql-empty-password`, `ms-sql-empty-password`,

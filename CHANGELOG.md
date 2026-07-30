@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-30
+
+### Added
+
+- `--update`/`--version`: self-update against the `main` branch over HTTPS, with a `bash -n`
+  syntax check before installing and a confirmation prompt (skippable via `auto_update: true`).
+  A rate-limited (24h), non-blocking version check runs on every invocation and only notifies
+  unless auto-update is enabled.
+
 ## [1.2.0] - 2026-07-30
 
 ### Added
@@ -75,7 +84,8 @@ profiles in `examples/`.
 
 `--diff`, `--webhook`, consolidated `SUMMARY.md`, plain-text run journal.
 
-[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/oxbyte0/nigoh/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/oxbyte0/nigoh/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/oxbyte0/nigoh/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/oxbyte0/nigoh/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxbyte0/nigoh/releases/tag/v1.0.0

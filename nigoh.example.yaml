@@ -55,6 +55,7 @@ diff: ""                       # path to a prior run directory to compare agains
 webhook: ""                    # URL to POST the run summary to on completion
 recurse_pivot: false           # auto-scan subnets discovered via traceroute (one hop deep)
 debug: false                   # verbose internal logging
+auto_update: false             # skip the confirmation prompt on --update / silent background install
 
 # --- example: a realistic internal-engagement profile -----------------------
 # Uncomment and adjust to make this the default for a specific engagement:

@@ -27,12 +27,17 @@ jobs:
       - name: Install yq (config file support)
         run: sudo apt-get update && sudo apt-get install -y yq
 
-      - name: Dry-run smoke test
+      - name: Version flag smoke test
         run: |
           chmod +x nigoh
+          ./nigoh --version | grep -qE '^nigoh v[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - name: Dry-run smoke test
+        run: |
           NIGOH_DRYRUN=1 NIGOH_NO_BANNER=1 ./nigoh -t 10.0.0.1 -m ctf -o /tmp/nigoh-ci-test
           NIGOH_DRYRUN=1 NIGOH_NO_BANNER=1 ./nigoh -t 10.0.0.1 -m ctf -o /tmp/nigoh-ci-test-2 \
-            --paranoid --firewall-map --ot --cve --udp --badsum-test --ttl 64 --sec-headers
+            --paranoid --firewall-map --ot --cve --udp --badsum-test --ttl 64 --sec-headers \
+            --misconfig --add-hosts
 
       - name: Chunked-scan smoke test (broader-than-/16 target, exercises flag forwarding)
         run: |

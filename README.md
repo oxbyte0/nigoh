@@ -31,6 +31,7 @@ of `nmap`.
 - [Scan Modes](#scan-modes)
 - [Command-Line Reference](#command-line-reference)
 - [Adaptive Defense Tuning](#adaptive-defense-tuning)
+- [Auto-Update](#auto-update)
 - [CIDR Sizing and Chunked Scanning](#cidr-sizing-and-chunked-scanning)
 - [Configuration File](#configuration-file)
 - [Resumability and State Persistence](#resumability-and-state-persistence)
@@ -185,7 +186,28 @@ than fixed, so it doesn't itself become a recognizable, constant-size signature 
 |---|---|
 | `-q`, `--quiet` | Suppresses the startup banner |
 | `--list` | Displays run history from `~/.nigoh/history.log` |
+| `--update` | Checks the `main` branch for a newer version and offers to install it — see [Auto-Update](#auto-update) |
+| `--version` | Prints the installed version |
 | `-h`, `--help` | Displays command-line help |
+
+## Auto-Update
+
+Every run does a rate-limited (once per 24h), non-blocking check against the version embedded in
+`main` on GitHub over HTTPS and prints a one-line notice if a newer one exists — nothing is ever
+downloaded or installed by this background check. `--update` (or a `nigoh --update` any time)
+performs the actual check-and-install: it fetches the raw script, verifies it's valid bash
+(`bash -n`) before touching anything, asks for confirmation on a terminal, and atomically replaces
+the file underlying wherever `nigoh` is actually installed (it resolves through the `/usr/local/bin`
+symlink first). It only ever writes to a temp file in the same directory and `mv`s it into place —
+if the syntax check fails, nothing is touched.
+
+Set `auto_update: true` in [the config file](#configuration-file) to skip the confirmation prompt
+entirely (for the background check too, which then installs silently instead of just notifying) —
+the currently-running scan is never interrupted, since bash has already read the whole script into
+memory; the new version takes effect on the next invocation. This trusts whatever is currently on
+`main` in the same way `git pull` would — there's no separate signature or checksum verification
+beyond the HTTPS connection to GitHub, since that's the actual trust boundary for a single-maintainer
+public script.
 
 ## Adaptive Defense Tuning
 
