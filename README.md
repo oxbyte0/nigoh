@@ -15,6 +15,8 @@ phase, resumes exactly where it left off, and adjusts its own scan aggression ba
 target appears to be actively defended. It is a single, dependency-light Bash script built on top
 of `nmap`.
 
+![nigoh --help](screenshot.png)
+
 ---
 
 ## Table of Contents
