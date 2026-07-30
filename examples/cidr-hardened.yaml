@@ -1,0 +1,59 @@
+# nigoh — large corporate network behind IDS/IPS
+#
+# A broad internal range (broader than /16) where you know or suspect a
+# properly configured monitoring stack is watching: a stateful firewall,
+# a real IDS/IPS, SOC eyes on alerts. The goal here isn't speed, it's not
+# tripping every wire in the building before you've even mapped it.
+#
+# Every setting below exists specifically for this scenario:
+#
+#   interface        REQUIRED by nigoh itself once target is broader than
+#                     /16 — this is not optional, and that is intentional.
+#                     A range this size is exactly the shape of a mistyped
+#                     octet scanning the wrong network. Naming the NIC
+#                     explicitly makes it a decision, not an accident.
+#
+#   allow_huge_scope  Only needed if target is /8 or broader. A /16-/9
+#                     range chunks into /24 blocks automatically without
+#                     this flag; /8-and-broader additionally requires it
+#                     as a second, explicit confirmation.
+#
+#   firewall_map      Runs an ACK/Window/Maimon differential pass BEFORE
+#                     the real sweep, so you know what the firewall
+#                     actually blocks before committing to anything louder.
+#
+#   paranoid          -T0 timing, 60s+ floor cooldown, overrides every
+#                     other timing decision including the adaptive probe.
+#                     This is the assume-someone-is-watching setting.
+#
+#   ttl               Set to match the target network's expected OS TTL
+#                     baseline (64 for Linux, 128 for Windows) so packets
+#                     do not stand out purely on TTL fingerprint.
+#
+# Even with all of this, the phase1c badsum probe built into nigoh still runs and
+# will throttle further if it detects active inspection — paranoid here
+# is a floor, not a substitute for that check.
+
+target: 10.44.0.0/14           # <-- change this
+mode: normal
+interface: eth1                # <-- change this to your actual egress NIC
+allow_huge_scope: false        # flip to true only if target is /8 or broader
+
+firewall_map: true
+paranoid: true
+ttl: 64                        # match expected OS baseline; adjust per target environment
+
+# Off by default in a monitored environment — each one is more packets,
+# more scripts, more chances to get noticed. Turn on deliberately, not by
+# default, once you understand what the firewall_map pass showed.
+udp: false
+vuln: false
+cve: false
+sec_headers: false
+
+# Optional: chain through a proxy for traffic-origin diversification.
+# Forces a TCP connect scan (proxying does not work over raw SYN).
+# proxy: socks4://127.0.0.1:9050
+
+# Optional: route the summary to wherever your team actually watches.
+# webhook: https://hooks.example.com/incoming/nigoh

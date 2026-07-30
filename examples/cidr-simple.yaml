@@ -1,0 +1,20 @@
+# nigoh — simple internal subnet profile
+#
+# A single /24 (or anything up to /16) on a network you already have
+# permission to be on, with no particular reason to expect active
+# monitoring. This is nigoh's `normal` mode at its most ordinary: ping
+# sweep, confirm, moderate-rate SYN sweep, service scan.
+#
+# Ranges up to /16 need nothing special — no --interface, no chunking,
+# no --allow-huge-scope. Those only kick in past /16; see cidr-hardened.yaml
+# for that case.
+
+target: 10.10.20.0/24          # <-- change this (anything /16 or narrower)
+mode: normal
+
+# Leave these off until you have a specific reason to turn them on —
+# they're the whole point of the adaptive defense probe (phase1c) picking
+# the right aggression automatically instead of you guessing up front.
+udp: false
+vuln: false
+cve: false

@@ -1,0 +1,65 @@
+# nigoh config file — example / template
+#
+# Copy this to ./nigoh.yaml in the directory you run nigoh from and it loads
+# automatically, no flag needed. To use a config from elsewhere or under a
+# different name, pass it explicitly: nigoh --config /path/to/this-file.yaml
+#
+# Precedence: command-line flags always win over this file. A config file
+# supplies *defaults* — think of it as "what I usually want," with the CLI
+# reserved for whatever's different about today's scan.
+#
+# Requires the `yq` tool to parse (apt install yq / pip install yq). If
+# nigoh finds a ./nigoh.yaml but yq isn't installed, it warns and ignores
+# the file rather than failing the scan — an explicit --config with yq
+# missing is a hard error instead, since that was a deliberate request.
+#
+# Every key below is optional. Unknown keys are ignored, not errors — so you
+# can keep scratch notes in this file without nigoh tripping over them.
+
+# --- target & output --------------------------------------------------------
+target: 10.10.20.0/24          # host, IP, or CIDR/range
+mode: normal                   # ctf | normal | fast | stealth
+out: ""                        # leave blank to use the default nigoh_<mode>_<timestamp> dir
+exclude: ""                    # path to a file of hosts/CIDRs to exclude
+
+# --- scan control ------------------------------------------------------------
+ports: ""                      # e.g. "22,80,443" — set to skip discovery entirely
+mac: ""                        # spoof MAC vendor prefix, e.g. "00:0c:29" (stealth/LAN only)
+keep_runs: 20                  # how many old run directories to retain
+masscan: false                 # seed the sweep with masscan before nmap confirms
+vuln: false                    # run nmap's safe vuln-category NSE scripts
+udp: false                     # also scan the top 200 UDP ports
+badsum_test: false             # one-off stateful-vs-stateless filtering diagnostic
+cve: false                     # match service versions against known CVEs (needs vulners/vulscan NSE)
+ot: false                      # ICS/OT-safe discovery profile (Modbus/S7/BACnet)
+sec_headers: false             # check discovered HTTP(S) services for HSTS/CSP/X-Frame-Options etc.
+
+# --- evasion -------------------------------------------------------------
+idle_zombie: ""                # blind idle scan through this host, e.g. "10.10.20.99"
+firewall_map: false            # map firewall policy (ACK/Window/Maimon) before the sweep
+paranoid: false                # -T0 + long floor cooldown, overrides every other timing decision
+ttl: ""                        # e.g. 64 or 128 — spoof IP TTL to match an expected OS baseline
+proxy: ""                      # e.g. "socks4://127.0.0.1:9050" — forces a TCP connect scan (-sT)
+
+# --- network safety --------------------------------------------------------
+interface: ""                  # e.g. "eth0" — REQUIRED by nigoh itself once target is
+                                # broader than /16, so a typo'd CIDR can't accidentally
+                                # scan out the wrong network. Harmless to always set.
+allow_huge_scope: false        # required (in addition to interface) to scan /8 or broader;
+                                # such a target still gets auto-chunked into /24 blocks
+
+# --- reporting & integration -------------------------------------------------
+diff: ""                       # path to a prior run directory to compare against
+webhook: ""                    # URL to POST the run summary to on completion
+recurse_pivot: false           # auto-scan subnets discovered via traceroute (one hop deep)
+debug: false                   # verbose internal logging
+
+# --- example: a realistic internal-engagement profile -----------------------
+# Uncomment and adjust to make this the default for a specific engagement:
+#
+# target: 10.44.0.0/16
+# mode: normal
+# interface: eth1
+# udp: true
+# cve: true
+# webhook: https://hooks.example.com/incoming/nigoh

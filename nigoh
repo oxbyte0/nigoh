@@ -1,0 +1,1009 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2054  # commas below are nmap port-list syntax inside one arg, not array separators
+set -euo pipefail
+
+# resolved through symlinks so banners/ is found next to the real script
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# colors (red/gray/white only, auto-disabled unless BOTH stdout+stderr are a tty, or NO_COLOR set)
+if [[ -t 1 && -t 2 && -z "${NO_COLOR:-}" ]]; then
+    C_RED=$'\033[1;31m'; C_DRED=$'\033[2;31m'; C_GRAY=$'\033[2;37m'; C_WHITE=$'\033[1;37m'; C_RESET=$'\033[0m'
+else
+    C_RED=""; C_DRED=""; C_GRAY=""; C_WHITE=""; C_RESET=""
+fi
+
+banner() {
+    [[ "${NIGOH_NO_BANNER:-0}" == "1" || "${QUIET:-0}" == "1" ]] && return 0
+    printf '%s' "$C_RED" >&2
+    local -a art=()
+    [[ -d "$SCRIPT_DIR/banners" ]] && art=("$SCRIPT_DIR"/banners/*)
+    if [[ "${#art[@]}" -gt 0 && -f "${art[0]}" ]]; then
+        cat "${art[RANDOM % ${#art[@]}]}" >&2
+    else
+        cat >&2 <<'EOF'
+        .-''-.
+       /  o o  \
+      |    ^    |
+       \  ---  /
+        '-...-'
+           |
+EOF
+    fi
+    printf '%s       N I G O H %s— nothing unseen.\n       ----+----%s\n' "$C_DRED" "$C_GRAY" "$C_RESET" >&2
+}
+
+print_help() {
+    banner
+    cat <<EOF
+${C_WHITE}nigoh${C_RESET} ${C_GRAY}—${C_RESET} mode-driven nmap automation wrapper (single host or CIDR)
+
+${C_WHITE}USAGE${C_RESET}
+  nigoh -t <target|CIDR> -m <mode> [options]
+  nigoh -r <outdir>
+
+${C_WHITE}MODES${C_RESET}
+  ${C_WHITE}ctf${C_RESET}       single host, no discovery overhead
+  ${C_WHITE}normal${C_RESET}    default: layered discovery, confirmation, service scan
+  ${C_WHITE}fast${C_RESET}      maximum rate and fingerprinting depth
+  ${C_WHITE}stealth${C_RESET}   fragmented, decoyed, low-footprint timing
+
+${C_WHITE}TARGET & OUTPUT${C_RESET}
+  ${C_WHITE}-t, --target${C_RESET} <x>      host/IP, or CIDR/range for normal|fast|stealth
+  ${C_WHITE}-m, --mode${C_RESET} <x>        ctf|normal|fast|stealth  ${C_GRAY}(default: normal)${C_RESET}
+  ${C_WHITE}-o, --out${C_RESET} <dir>       output directory  ${C_GRAY}(default: nigoh_<mode>_<timestamp>)${C_RESET}
+  ${C_WHITE}-r, --resume${C_RESET} <dir>    resume a previous run, including all its original flags
+  ${C_WHITE}-x, --exclude${C_RESET} <file>  hosts/CIDRs to exclude
+  ${C_WHITE}-e, --interface${C_RESET} <if>  egress interface  ${C_GRAY}(required for targets broader than /16)${C_RESET}
+
+${C_WHITE}SCAN CONTROL${C_RESET}
+  ${C_WHITE}-p, --ports${C_RESET} <list>    scan these ports directly, skip discovery
+      ${C_WHITE}--mac${C_RESET} <vendor>    spoof MAC vendor prefix  ${C_GRAY}(stealth/LAN only)${C_RESET}
+      ${C_WHITE}--masscan${C_RESET}         seed the sweep with masscan before nmap confirms
+      ${C_WHITE}--vuln${C_RESET}            safe NSE vuln-category scripts, rate-capped
+      ${C_WHITE}--udp${C_RESET}             top-200 UDP sweep
+      ${C_WHITE}--badsum-test${C_RESET}     stateful vs. stateless filtering diagnostic
+      ${C_WHITE}--cve${C_RESET}             match service versions against known CVEs  ${C_GRAY}(needs vulners/vulscan NSE)${C_RESET}
+      ${C_WHITE}--ot${C_RESET}              ICS/OT-safe discovery: Modbus, S7, BACnet
+      ${C_WHITE}--sec-headers${C_RESET}     check HTTP responses for HSTS/CSP/X-Frame-Options etc.
+
+${C_WHITE}EVASION${C_RESET}
+      ${C_WHITE}--idle-zombie${C_RESET} <host>  blind idle scan through a zombie host
+      ${C_WHITE}--firewall-map${C_RESET}    map firewall policy before committing to a sweep
+      ${C_WHITE}--paranoid${C_RESET}        maximum timing caution, overrides all other tuning
+      ${C_WHITE}--ttl${C_RESET} <n>         spoof the IP TTL  ${C_GRAY}(1-255)${C_RESET}
+      ${C_WHITE}--proxy${C_RESET} <url>     chain through a SOCKS4/HTTP proxy  ${C_GRAY}(forces TCP connect scan)${C_RESET}
+
+${C_WHITE}ADVANCED${C_RESET}
+      ${C_WHITE}--recurse-pivot${C_RESET}   scan subnets discovered via traceroute  ${C_GRAY}(depth-capped at 1)${C_RESET}
+      ${C_WHITE}--keep-runs${C_RESET} <n>   run history retention  ${C_GRAY}(default: 20)${C_RESET}
+      ${C_WHITE}--diff${C_RESET} <dir>      compare this run against a prior one
+      ${C_WHITE}--webhook${C_RESET} <url>   deliver the summary to a URL on completion
+      ${C_WHITE}--allow-huge-scope${C_RESET} allow a /8-or-broader CIDR target  ${C_GRAY}(auto-chunked into /24s)${C_RESET}
+      ${C_WHITE}--config${C_RESET} <file>   load defaults from a YAML file  ${C_GRAY}(auto-loads ./nigoh.yaml, CLI wins)${C_RESET}
+      ${C_WHITE}--debug${C_RESET}           verbose internal logging
+
+${C_WHITE}UTILITY${C_RESET}
+  ${C_WHITE}-q, --quiet${C_RESET}           suppress the startup banner
+      ${C_WHITE}--list${C_RESET}            show run history (~/.nigoh/history.log)
+  ${C_WHITE}-h, --help${C_RESET}            this text
+
+${C_WHITE}EXAMPLES${C_RESET}
+  nigoh -t 10.10.11.5 -m ctf              ${C_GRAY}quick single-host scan${C_RESET}
+  nigoh -t 10.10.20.0/24 -m normal        ${C_GRAY}full subnet, default caution${C_RESET}
+  nigoh -r nigoh_ctf_20260730_095910      ${C_GRAY}resume an interrupted run${C_RESET}
+
+${C_GRAY}Full documentation, adaptive-tuning details, and further examples: README.md${C_RESET}
+EOF
+}
+
+log()  {
+    local msg="$*"
+    if [[ "$msg" =~ ^(phase[0-9]+[a-z]?):(.*)$ ]]; then
+        msg="${C_WHITE}${BASH_REMATCH[1]}:${C_RESET}${BASH_REMATCH[2]}"
+    fi
+    printf '%s[+]%s %s\n' "$C_WHITE" "$C_RESET" "$msg"
+}
+warn() { printf '%s[-]%s %s\n' "$C_DRED" "$C_RESET" "$*" >&2; }
+die()  { printf '%s[!]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+dbg()  { [[ "${DEBUG:-0}" == "1" ]] && printf '%s[dbg]%s %s\n' "$C_GRAY" "$C_RESET" "$*" >&2; return 0; }
+
+# state persistence
+save_state() {
+    local tmp; tmp=$(mktemp "$OUTDIR/.state.XXXXXX") || die "failed to create state file in $OUTDIR (disk full or permission denied?)"
+    { printf 'MODE=%q\nTARGET=%q\nCURRENT_PHASE=%q\n' "$MODE" "$TARGET" "$CURRENT_PHASE"
+      printf 'PHASE_DISCOVERY_DONE=%q\nPHASE_SWEEP_DONE=%q\n' "$PHASE_DISCOVERY_DONE" "$PHASE_SWEEP_DONE"
+      printf 'SERVICE_DONE_HOSTS=%q\nEVASION_DONE_HOSTS=%q\nVULN_DONE_HOSTS=%q\n' \
+             "$SERVICE_DONE_HOSTS" "$EVASION_DONE_HOSTS" "$VULN_DONE_HOSTS"
+      printf 'PHASE_UDP_DONE=%q\nPHASE_OS_DONE=%q\nPHASE_BADSUM_DONE=%q\n' \
+             "$PHASE_UDP_DONE" "$PHASE_OS_DONE" "$PHASE_BADSUM_DONE"
+      printf 'PHASE_DEFENSE_DONE=%q\nDEFENSE_DETECTED=%q\n' "$PHASE_DEFENSE_DONE" "$DEFENSE_DETECTED"
+      printf 'PHASE_FWMAP_DONE=%q\nPHASE_OT_DONE=%q\n' "$PHASE_FWMAP_DONE" "$PHASE_OT_DONE"
+      # every opt-in flag must survive a bare -r resume
+      printf 'PORTS_OVERRIDE=%q\nEXCLUDE_FILE=%q\nMAC_SPOOF=%q\nKEEP_RUNS=%q\n' \
+             "$PORTS_OVERRIDE" "$EXCLUDE_FILE" "$MAC_SPOOF" "$KEEP_RUNS"
+      printf 'USE_MASSCAN=%q\nDO_VULN=%q\nDO_UDP=%q\nDO_BADSUM=%q\nRECURSE_PIVOT=%q\n' \
+             "$USE_MASSCAN" "$DO_VULN" "$DO_UDP" "$DO_BADSUM" "$RECURSE_PIVOT"
+      printf 'IDLE_ZOMBIE=%q\nDO_FWMAP=%q\nPARANOID=%q\nDO_OT=%q\nBASELINE_DIR=%q\nDO_CVE=%q\nWEBHOOK_URL=%q\n' \
+             "$IDLE_ZOMBIE" "$DO_FWMAP" "$PARANOID" "$DO_OT" "$BASELINE_DIR" "$DO_CVE" "$WEBHOOK_URL"
+      printf 'ALLOW_HUGE_SCOPE=%q\nCHUNK_MODE=%q\nCHUNK_PREFIX=%q\nCHUNK_LIST=%q\nCHUNK_DONE_HOSTS=%q\n' \
+             "$ALLOW_HUGE_SCOPE" "$CHUNK_MODE" "$CHUNK_PREFIX" "$CHUNK_LIST" "$CHUNK_DONE_HOSTS"
+      printf 'INTERFACE=%q\nCONFIG_FILE=%q\nQUIET=%q\n' "$INTERFACE" "$CONFIG_FILE" "$QUIET"
+      printf 'TTL=%q\nPROXY_URL=%q\nDO_SECHEADERS=%q\nRAND_DATA_LEN=%q\nDEBUG=%q\n' \
+             "$TTL" "$PROXY_URL" "$DO_SECHEADERS" "$RAND_DATA_LEN" "$DEBUG"
+    } > "$tmp"
+    mv -f "$tmp" "$OUTDIR/.nigoh_state"
+}
+
+# plain append-only log, no .git metadata in scan output
+journal_append() {
+    printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$1" >> "$OUTDIR/.nigoh_journal"
+}
+
+prune_empty_outputs() {
+    find . -type f \( -name '*.nmap' -o -name '*.gnmap' -o -name '*.xml' \) -empty -delete 2>/dev/null || true
+}
+
+prune_old_runs() {
+    local keep="$1"
+    [[ -f "$HIST_DIR/history.log" ]] || return 0
+    local total; total=$(wc -l < "$HIST_DIR/history.log")
+    [[ "$total" -le "$keep" ]] && return 0
+    local cutoff=$((total - keep))
+    head -n "$cutoff" "$HIST_DIR/history.log" | grep -oP 'outdir=\K.*' | while read -r dir; do
+        if [[ -d "$dir" ]]; then rm -rf -- "$dir"; fi
+    done
+    tail -n "$keep" "$HIST_DIR/history.log" > "$HIST_DIR/history.log.tmp"
+    mv -f "$HIST_DIR/history.log.tmp" "$HIST_DIR/history.log"
+}
+
+cleanup_run() {
+    prune_empty_outputs
+    [[ -f sweep/masscan.lst ]] && rm -f sweep/masscan.lst
+    # chunk children never touch shared history/prune state
+    if [[ "${NIGOH_CHUNK_CHILD:-0}" != 1 ]]; then
+        prune_old_runs "$KEEP_RUNS"
+    fi
+}
+
+on_interrupt() {
+    warn "interrupted at phase: $CURRENT_PHASE"
+    if [[ -n "$CHILD_PID" ]] && kill -0 "$CHILD_PID" 2>/dev/null; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
+    save_state
+    journal_append "interrupted: $CURRENT_PHASE"
+    warn "resume with: nigoh -r $OUTDIR"
+    exit 130
+}
+
+run_nmap() {
+    dbg "run_nmap: nmap $*"
+    local attempt delays=(1 3 7) rc=0
+    for attempt in 1 2 3 4; do
+        if [[ "${NIGOH_DRYRUN:-0}" == "1" ]]; then
+            if [[ "$attempt" -le "${NIGOH_DRYRUN_FAIL_COUNT:-0}" ]]; then
+                ( log "[dryrun-fail] nmap $* (attempt $attempt)"; sleep "${NIGOH_DRYRUN_SLEEP:-0.2}"; exit 1 ) &
+            else
+                ( log "[dryrun] nmap $* (attempt $attempt)"; sleep "${NIGOH_DRYRUN_SLEEP:-0.2}" ) &
+            fi
+        else
+            # centralized: live progress + pinned interface + spoofed TTL for every call
+            local -a extra=(--stats-every "${STATS_EVERY:-180s}")
+            [[ -n "${INTERFACE:-}" ]] && extra+=(-e "$INTERFACE")
+            [[ -n "${TTL:-}" ]] && extra+=(--ttl "$TTL")
+            nmap "$@" "${extra[@]}" &
+        fi
+        CHILD_PID=$!
+        rc=0
+        wait "$CHILD_PID" || rc=$?
+        CHILD_PID=""
+        [[ "$rc" -eq 0 ]] && return 0
+        if [[ "$attempt" -lt 4 ]]; then
+            warn "attempt $attempt failed (rc=$rc), retrying in ${delays[$((attempt-1))]}s"
+            sleep "${delays[$((attempt-1))]}"
+        fi
+    done
+    warn "all 4 attempts failed, giving up"
+    return "$rc"
+}
+
+cooldown() {
+    local secs="${1:-0}"
+    [[ "$secs" -gt 0 && "${NIGOH_DRYRUN:-0}" != 1 ]] || return 0
+    log "cooldown: ${secs}s pause (avoid post-sweep rate-limit/IDS block on target)"
+    sleep "$secs"
+}
+
+all_ports_filtered() {
+    # sweep already proved these open; all-filtered now means rate-limited
+    local nmap_file="$1"
+    [[ -f "$nmap_file" ]] || return 1
+    grep -qE '^[0-9]+/tcp +filtered' "$nmap_file" || return 1
+    ! grep -qE '^[0-9]+/tcp +open' "$nmap_file"
+}
+
+# badsum differential: stateless ACLs still answer a corrupt-checksum SYN,
+# stateful FW/IDS drops it — more drops than answers means active defense
+probe_defense() {
+    local host="$1"
+    log "phase1c: defense probe (badsum differential) on $host"
+    run_nmap -Pn --badsum -p22,80,443,8080,8443 --max-retries 1 --host-timeout 15s \
+             -oA discovery/defense_probe "$host" || true
+    local filtered=0 answered=0
+    if [[ -f discovery/defense_probe.nmap ]]; then
+        filtered=$(grep -cE '^[0-9]+/tcp +filtered' discovery/defense_probe.nmap || true)
+        answered=$(grep -cE '^[0-9]+/tcp +(open|closed)' discovery/defense_probe.nmap || true)
+    fi
+    if [[ "$filtered" -gt "$answered" ]]; then
+        DEFENSE_DETECTED=1
+        log "phase1c: $filtered/$((filtered+answered)) malformed probes dropped — active inspection likely, throttling down"
+    else
+        DEFENSE_DETECTED=0
+        log "phase1c: $answered/$((filtered+answered)) malformed probes answered normally — no active inspection detected, staying aggressive"
+    fi
+}
+
+# scale the numeric value following a flag token in an nmap arg array
+scale_arg_value() {
+    local -n sav_target="$1"
+    local flag="$2" op="$3" factor="$4" floor="${5:-0}" ceil="${6:-999999}"
+    local i v
+    for i in "${!sav_target[@]}"; do
+        [[ "${sav_target[$i]}" == "$flag" ]] || continue
+        v="${sav_target[i+1]}"
+        [[ "$v" =~ ^[0-9]+$ ]] || continue
+        if [[ "$op" == div ]]; then v=$(( v / factor )); else v=$(( v * factor )); fi
+        (( v < floor )) && v=$floor
+        (( v > ceil )) && v=$ceil
+        sav_target[i+1]=$v
+    done
+}
+
+throttle_for_defense() {
+    local -n throttle_target="$1"
+    scale_arg_value "$1" --min-rate div 4 200
+    scale_arg_value "$1" --max-retries div 2 1
+    scale_arg_value "$1" --version-intensity div 2 2
+    local i
+    for i in "${!throttle_target[@]}"; do
+        if [[ "${throttle_target[$i]}" == "-T4" || "${throttle_target[$i]}" == "-T5" ]]; then
+            throttle_target[i]="-T3"
+        fi
+    done
+    throttle_target+=(--scan-delay 100ms)
+}
+
+boost_for_no_defense() {
+    scale_arg_value "$1" --min-rate mul 3 0 20000
+    scale_arg_value "$1" --version-intensity mul 2 0 9
+}
+
+# swap -sS for a blind idle/zombie scan; our IP never talks to the target
+apply_idle_zombie() {
+    local -n zombie_target="$1"
+    local zombie="$2" i newarr=()
+    for i in "${!zombie_target[@]}"; do
+        if [[ "${zombie_target[$i]}" == "-sS" ]]; then
+            newarr+=(-sI "$zombie")
+        else
+            newarr+=("${zombie_target[$i]}")
+        fi
+    done
+    zombie_target=("${newarr[@]}")
+}
+
+# force paranoid timing (-T0) onto every -Tn token in an arg array
+force_paranoid_timing() {
+    local -n paranoid_target="$1"
+    local i
+    for i in "${!paranoid_target[@]}"; do
+        if [[ "${paranoid_target[$i]}" =~ ^-T[0-5]$ ]]; then
+            paranoid_target[i]="-T0"
+        fi
+    done
+}
+
+# --proxies only works over TCP connect scans, not raw SYN; swap -sS for -sT
+apply_connect_scan() {
+    local -n conn_target="$1"
+    local i
+    for i in "${!conn_target[@]}"; do
+        if [[ "${conn_target[$i]}" == "-sS" ]]; then
+            conn_target[i]="-sT"
+        fi
+    done
+}
+
+host_in_list() { [[ " $1 " == *" $2 "* ]]; }
+mark_host_done() {
+    local -n list_ref="$1"
+    host_in_list "$list_ref" "$2" || list_ref="$list_ref $2"
+    save_state
+}
+
+is_cidr() {
+    # bail on any letter first, or a hostname like db-01 false-positives
+    [[ "$1" =~ [a-zA-Z] ]] && return 1
+    [[ "$1" == *"/"* || "$1" == *","* || "$1" =~ -[0-9] ]]
+}
+
+open_ports_for() {
+    # gnmap records the resolved IP in Host:, hostname trails in parens
+    local h="${1//./\\.}"
+    grep -E "^Host: ($h |[0-9.]+ \\($h\\))" sweep/tcp_full.gnmap 2>/dev/null \
+        | grep -oP '\d+/open' | cut -d/ -f1 | sort -n -u | paste -sd, - || true
+}
+
+detect_pivot_subnets() {
+    awk '/^TRACEROUTE/{f=1;next} f' "$1" 2>/dev/null \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+        | awk -F. '{print $1"."$2"."$3".0/24"}' \
+        | sort -u
+}
+
+ip2int() {
+    local o1 o2 o3 o4
+    IFS=. read -r o1 o2 o3 o4 <<< "$1"
+    echo $(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))
+}
+int2ip() {
+    local i="$1"
+    echo "$(( (i >> 24) & 255 )).$(( (i >> 16) & 255 )).$(( (i >> 8) & 255 )).$(( i & 255 ))"
+}
+
+# only literal a.b.c.d/N has a prefix; comma-lists and ranges do not
+cidr_prefix_len() {
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]{1,2})$ ]] || return 1
+    echo "${BASH_REMATCH[2]}"
+}
+
+# splits a broader-than-/16 CIDR into its contained /24 subnets
+cidr_to_24_chunks() {
+    local cidr="$1" net bits ni mask base count i block
+    net="${cidr%/*}"; bits="${cidr#*/}"
+    ni=$(ip2int "$net")
+    if [[ "$bits" -eq 0 ]]; then mask=0; else mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF )); fi
+    base=$(( ni & mask ))
+    count=$(( 1 << (24 - bits) ))
+    # inlined octet math, no int2ip subshell fork per line (a /9 is 32768 lines)
+    for (( i = 0; i < count; i++ )); do
+        block=$(( base + i * 256 ))
+        printf '%d.%d.%d.0/24\n' "$(( (block >> 24) & 255 ))" "$(( (block >> 16) & 255 ))" "$(( (block >> 8) & 255 ))"
+    done
+}
+
+fmt_duration() {
+    local s="$1" h m
+    h=$(( s / 3600 )); m=$(( (s % 3600) / 60 )); s=$(( s % 60 ))
+    if [[ "$h" -gt 0 ]]; then printf '%dh%dm%ds' "$h" "$m" "$s"
+    elif [[ "$m" -gt 0 ]]; then printf '%dm%ds' "$m" "$s"
+    else printf '%ds' "$s"; fi
+}
+
+# scans each /24 in CHUNK_LIST as a child run, skips ones already done,
+# ETA is the measured average of completed chunks, never a pre-scan guess
+run_chunked_scan() {
+    local -a chunks
+    read -ra chunks <<< "$CHUNK_LIST"
+    local total="${#chunks[@]}" idx=0 chunk slug start end elapsed
+    local sum_elapsed=0 n_timed=0
+    # O(1) lookup instead of host_in_list O(n) scan; matters at thousands of chunks
+    local -A done_map=() d
+    for d in $CHUNK_DONE_HOSTS; do done_map["$d"]=1; done
+    log "chunked scan: $total /24 block(s) from a target broader than /16"
+    for chunk in "${chunks[@]}"; do
+        idx=$((idx + 1))
+        if [[ -n "${done_map[$chunk]:-}" ]]; then
+            continue
+        fi
+        local pct=$(( (idx - 1) * 100 / total )) eta_msg="calculating"
+        if [[ "$n_timed" -gt 0 ]]; then
+            local avg=$(( sum_elapsed / n_timed )) remaining=$(( total - idx + 1 ))
+            eta_msg="$(fmt_duration "$(( avg * remaining ))") remaining (avg $(fmt_duration "$avg")/chunk)"
+        fi
+        log "chunk $idx/$total (${pct}%): $chunk — ETA: $eta_msg"
+        slug=$(printf '%s' "$chunk" | tr '/.' '__')
+        start=$(date +%s)
+        run_chunk_child "$chunk" "chunk_$slug"
+        end=$(date +%s)
+        elapsed=$(( end - start ))
+        sum_elapsed=$(( sum_elapsed + elapsed )); n_timed=$((n_timed + 1))
+        mark_host_done CHUNK_DONE_HOSTS "$chunk"
+        journal_append "chunk done: $chunk (${elapsed}s)"
+    done
+    log "chunked scan complete: $total /24 block(s), $(fmt_duration "$sum_elapsed") total"
+    {
+        echo "# nigoh chunked summary — mode=$MODE target=$TARGET"
+        echo "$total /24 block(s)"
+        echo
+        for chunk in "${chunks[@]}"; do
+            slug=$(printf '%s' "$chunk" | tr '/.' '__')
+            [[ -f "chunk_$slug/SUMMARY.md" ]] || continue
+            echo "## $chunk"
+            cat "chunk_$slug/SUMMARY.md"
+            echo
+        done
+    } > SUMMARY.md
+}
+
+# rebuilds child flags from resolved config vars, not argv — a bare -r
+# resume has none of the original flags in argv, only in these variables
+run_chunk_child() {
+    local chunk="$1" chunk_dir="$2"
+    local -a child_args=(-m "$MODE")
+    [[ -n "$PORTS_OVERRIDE" ]] && child_args+=(-p "$PORTS_OVERRIDE")
+    [[ -n "$EXCLUDE_FILE" ]] && child_args+=(-x "$EXCLUDE_FILE")
+    [[ -n "$INTERFACE" ]] && child_args+=(-e "$INTERFACE")
+    [[ -n "$MAC_SPOOF" ]] && child_args+=(--mac "$MAC_SPOOF")
+    [[ "$USE_MASSCAN" == 1 ]] && child_args+=(--masscan)
+    [[ "$DO_VULN" == 1 ]] && child_args+=(--vuln)
+    [[ "$DO_UDP" == 1 ]] && child_args+=(--udp)
+    [[ "$DO_BADSUM" == 1 ]] && child_args+=(--badsum-test)
+    [[ "$DEBUG" == 1 ]] && child_args+=(--debug)
+    [[ "$RECURSE_PIVOT" == 1 ]] && child_args+=(--recurse-pivot)
+    child_args+=(--keep-runs "$KEEP_RUNS")
+    [[ -n "$IDLE_ZOMBIE" ]] && child_args+=(--idle-zombie "$IDLE_ZOMBIE")
+    [[ "$DO_FWMAP" == 1 ]] && child_args+=(--firewall-map)
+    [[ "$PARANOID" == 1 ]] && child_args+=(--paranoid)
+    [[ "$DO_OT" == 1 ]] && child_args+=(--ot)
+    [[ -n "$BASELINE_DIR" ]] && child_args+=(--diff "$BASELINE_DIR")
+    [[ "$DO_CVE" == 1 ]] && child_args+=(--cve)
+    [[ -n "$WEBHOOK_URL" ]] && child_args+=(--webhook "$WEBHOOK_URL")
+    [[ -n "$TTL" ]] && child_args+=(--ttl "$TTL")
+    [[ -n "$PROXY_URL" ]] && child_args+=(--proxy "$PROXY_URL")
+    [[ "$DO_SECHEADERS" == 1 ]] && child_args+=(--sec-headers)
+    [[ "$QUIET" == 1 ]] && child_args+=(-q)
+    NIGOH_CHUNK_CHILD=1 "$0" -t "$chunk" -o "$OUTDIR/$chunk_dir" "${child_args[@]}" || warn "chunk $chunk exited non-zero"
+}
+
+# validators
+validate_target() { [[ -n "$1" ]] || die "need -t/--target (-h for help)"; }
+validate_mode() { case "$1" in ctf|normal|fast|stealth) ;; *) die "bad mode: $1 (want ctf|normal|fast|stealth)" ;; esac; }
+validate_ports() { [[ -z "$1" || "$1" =~ ^[0-9,-]+$ ]] || die "bad port list: $1"; }
+validate_exclude_file() { [[ -z "$1" || -r "$1" ]] || die "exclude file not readable: $1"; }
+validate_outdir() {
+    local dir="$1"
+    while [[ ! -d "$dir" ]]; do dir=$(dirname -- "$dir"); done
+    [[ -w "$dir" ]] || die "output path not writable under: $dir"
+}
+validate_mac() { return 0; }
+validate_baseline_dir() { [[ -z "$1" || -d "$1" ]] || die "baseline dir not found: $1"; }
+validate_webhook() { [[ -z "$1" || "$1" =~ ^https?:// ]] || die "bad webhook url (need http:// or https://): $1"; }
+validate_keep_runs() { [[ "$1" =~ ^[0-9]+$ ]] || die "bad --keep-runs value (need a non-negative integer): $1"; }
+validate_ttl() { [[ -z "$1" || ("$1" =~ ^[0-9]+$ && "$1" -ge 1 && "$1" -le 255) ]] || die "bad --ttl value (need 1-255): $1"; }
+validate_proxy() { [[ -z "$1" || "$1" =~ ^(socks4|http):// ]] || die "bad --proxy url (need socks4:// or http://): $1"; }
+
+list_interfaces() {
+    ip -o -4 addr show 2>/dev/null | awk '{printf "  %-10s %s\n", $2, $4}'
+}
+
+# maps a fixed set of known keys into the same vars CLI flags set, one
+# key at a time via yq, never sources or evals the file. CLI parses after
+# this and wins over anything the config sets.
+load_config_if_given() {
+    local -a args=("$@")
+    local file="" explicit=0 i
+    for (( i = 0; i < ${#args[@]}; i++ )); do
+        if [[ "${args[i]}" == "--config" ]]; then file="${args[i+1]:-}"; explicit=1; break; fi
+    done
+    [[ -z "$file" && -f "nigoh.yaml" ]] && file="nigoh.yaml"
+    [[ -z "$file" ]] && return 0
+    [[ "$explicit" == 1 && ! -f "$file" ]] && die "config file not found: $file"
+    [[ -f "$file" ]] || return 0
+    if ! command -v yq >/dev/null 2>&1; then
+        [[ "$explicit" == 1 ]] && die "--config given but 'yq' is not installed (needed to parse YAML)"
+        warn "found nigoh.yaml but 'yq' is not installed, ignoring it"
+        return 0
+    fi
+    yq -e '.' "$file" >/dev/null 2>&1 || die "invalid or unreadable YAML in config file: $file"
+    log "loading config: $file"
+    local v
+    v=$(yq -r '.target // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && TARGET="$v"
+    v=$(yq -r '.mode // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && { MODE="$v"; MODE_EXPLICIT=1; }
+    v=$(yq -r '.out // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && OUTDIR="$v"
+    v=$(yq -r '.ports // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && PORTS_OVERRIDE="$v"
+    v=$(yq -r '.exclude // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && EXCLUDE_FILE="$v"
+    v=$(yq -r '.mac // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && MAC_SPOOF="$v"
+    v=$(yq -r '.interface // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && INTERFACE="$v"
+    v=$(yq -r '.keep_runs // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && KEEP_RUNS="$v"
+    v=$(yq -r '.idle_zombie // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && IDLE_ZOMBIE="$v"
+    v=$(yq -r '.diff // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && BASELINE_DIR="$v"
+    v=$(yq -r '.webhook // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && WEBHOOK_URL="$v"
+    v=$(yq -r '.allow_huge_scope // false' "$file" 2>/dev/null); [[ "$v" == true ]] && ALLOW_HUGE_SCOPE=1
+    v=$(yq -r '.masscan // false' "$file" 2>/dev/null); [[ "$v" == true ]] && USE_MASSCAN=1
+    v=$(yq -r '.vuln // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_VULN=1
+    v=$(yq -r '.udp // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_UDP=1
+    v=$(yq -r '.badsum_test // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_BADSUM=1
+    v=$(yq -r '.debug // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DEBUG=1
+    v=$(yq -r '.recurse_pivot // false' "$file" 2>/dev/null); [[ "$v" == true ]] && RECURSE_PIVOT=1
+    v=$(yq -r '.firewall_map // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_FWMAP=1
+    v=$(yq -r '.paranoid // false' "$file" 2>/dev/null); [[ "$v" == true ]] && PARANOID=1
+    v=$(yq -r '.ot // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_OT=1
+    v=$(yq -r '.cve // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_CVE=1
+    v=$(yq -r '.quiet // false' "$file" 2>/dev/null); [[ "$v" == true ]] && QUIET=1
+    v=$(yq -r '.ttl // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && TTL="$v"
+    v=$(yq -r '.proxy // ""' "$file" 2>/dev/null); [[ -n "$v" && "$v" != null ]] && PROXY_URL="$v"
+    v=$(yq -r '.sec_headers // false' "$file" 2>/dev/null); [[ "$v" == true ]] && DO_SECHEADERS=1
+    return 0
+}
+
+set_mode_params() {
+    case "$MODE" in
+    ctf)
+        DISC_ARGS=()
+        SWEEP_ARGS=(-sS -Pn -p- --min-rate 5000 --max-retries 2
+                    --max-rtt-timeout 300ms --initial-rtt-timeout 100ms -T4)
+        SERVICE_ARGS=(-sCV -T4 --min-rate 5000 --version-intensity 7)
+        OS_ARGS=(-O --osscan-guess)
+        EVASION_ON=0; MASSCAN_RATE=5000; COOLDOWN=20
+        ;;
+    normal)
+        DISC_ARGS=(-sn -PE -PS22,80,443,445,3389 -PA80,443 -PU53,161 --min-rate 1000 -T3)
+        SWEEP_ARGS=(-sS -Pn -p- --min-rate 3000 --max-retries 2 --defeat-rst-ratelimit -T3)
+        SERVICE_ARGS=(-sCV -T3 --version-intensity 5)
+        OS_ARGS=(-O)
+        EVASION_ON=0; MASSCAN_RATE=3000; COOLDOWN=8
+        ;;
+    fast)
+        DISC_ARGS=(-sn -PE -PS21,22,25,80,443,445,3389,8080 -PA80,443 -PU53,161 --min-rate 6000 -T4)
+        SWEEP_ARGS=(-sS -Pn -p- --min-rate 10000 --max-retries 1
+                    --defeat-rst-ratelimit -T4)
+        SERVICE_ARGS=(-sCV -T4 --version-intensity 9 --version-all)
+        OS_ARGS=(-O --osscan-guess --max-os-tries 2)
+        EVASION_ON=0; MASSCAN_RATE=10000; COOLDOWN=20
+        ;;
+    stealth)
+        DISC_ARGS=(-sn -PE -PS443 --scan-delay 1s --max-retries 1 --randomize-hosts -T2)
+        SWEEP_ARGS=(-sS -Pn -f --data-length "$RAND_DATA_LEN" -D RND:8,ME --source-port 53
+                    --scan-delay 300ms --max-parallelism 1 --randomize-hosts --max-retries 1 -T2 -p-)
+        SERVICE_ARGS=(-sV --version-intensity 2 -T2 --scan-delay 300ms -f --data-length "$RAND_DATA_LEN" --source-port 53)
+        OS_ARGS=()
+        EVASION_ON=1; MASSCAN_RATE=1000; COOLDOWN=0
+        ;;
+    esac
+    if [[ -n "$MAC_SPOOF" ]]; then
+        SWEEP_ARGS=(--spoof-mac "$MAC_SPOOF" "${SWEEP_ARGS[@]}")
+    fi
+}
+
+main() {
+MODE="normal"; TARGET=""; OUTDIR=""; PORTS_OVERRIDE=""; EXCLUDE_FILE=""
+MAC_SPOOF=""; USE_MASSCAN=0; DO_VULN=0; DO_UDP=0; DO_BADSUM=0; RESUME_DIR=""; DEBUG=0; RECURSE_PIVOT=0
+MODE_EXPLICIT=0; KEEP_RUNS=20
+IDLE_ZOMBIE=""; DO_FWMAP=0; PARANOID=0; DO_OT=0; BASELINE_DIR=""; DO_CVE=0; WEBHOOK_URL=""
+ALLOW_HUGE_SCOPE=0; CHUNK_MODE=0; CHUNK_PREFIX=""; CHUNK_LIST=""; CHUNK_DONE_HOSTS=""
+INTERFACE=""; CONFIG_FILE=""; QUIET=0
+TTL=""; PROXY_URL=""; DO_SECHEADERS=0; RAND_DATA_LEN=""
+HIST_DIR="$HOME/.nigoh"
+CHILD_PID=""; CURRENT_PHASE="init"
+
+# loaded before argv parsing so CLI flags always win over config values
+load_config_if_given "$@"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--target|-m|--mode|-o|--out|-p|--ports|-x|--exclude|-r|--resume|-e|--interface| \
+        --mac|--keep-runs|--idle-zombie|--diff|--webhook|--config|--ttl|--proxy)
+            [[ $# -ge 2 ]] || die "$1 requires a value (-h for help)" ;;
+    esac
+    case "$1" in
+        -t|--target) TARGET="$2"; shift 2 ;;
+        -m|--mode) MODE="$2"; MODE_EXPLICIT=1; shift 2 ;;
+        -o|--out) OUTDIR="$2"; shift 2 ;;
+        -p|--ports) PORTS_OVERRIDE="$2"; shift 2 ;;
+        -x|--exclude) EXCLUDE_FILE="$2"; shift 2 ;;
+        -r|--resume) RESUME_DIR="$2"; shift 2 ;;
+        -e|--interface) INTERFACE="$2"; shift 2 ;;
+        --mac) MAC_SPOOF="$2"; shift 2 ;;
+        --masscan) USE_MASSCAN=1; shift ;;
+        --vuln) DO_VULN=1; shift ;;
+        --udp) DO_UDP=1; shift ;;
+        --badsum-test) DO_BADSUM=1; shift ;;
+        --debug) DEBUG=1; shift ;;
+        --recurse-pivot) RECURSE_PIVOT=1; shift ;;
+        --keep-runs) KEEP_RUNS="$2"; shift 2 ;;
+        --idle-zombie) IDLE_ZOMBIE="$2"; shift 2 ;;
+        --firewall-map) DO_FWMAP=1; shift ;;
+        --paranoid) PARANOID=1; shift ;;
+        --ot) DO_OT=1; shift ;;
+        --diff) BASELINE_DIR="$2"; shift 2 ;;
+        --cve) DO_CVE=1; shift ;;
+        --webhook) WEBHOOK_URL="$2"; shift 2 ;;
+        --allow-huge-scope) ALLOW_HUGE_SCOPE=1; shift ;;
+        --config) CONFIG_FILE="$2"; shift 2 ;;
+        --ttl) TTL="$2"; shift 2 ;;
+        --proxy) PROXY_URL="$2"; shift 2 ;;
+        --sec-headers) DO_SECHEADERS=1; shift ;;
+        -q|--quiet) QUIET=1; shift ;;
+        --list) mkdir -p "$HIST_DIR"; cat "$HIST_DIR/history.log" 2>/dev/null || true; exit 0 ;;
+        -h|--help) print_help; exit 0 ;;
+        *) die "unknown arg: $1 (-h for help)" ;;
+    esac
+done
+
+if [[ -n "$RESUME_DIR" ]]; then
+    [[ -f "$RESUME_DIR/.nigoh_state" ]] || die "no state file in $RESUME_DIR"
+    OUTDIR="$RESUME_DIR"
+    # shellcheck disable=SC1091
+    source "$OUTDIR/.nigoh_state"
+    banner
+    log "resuming $MODE run on $TARGET from phase: $CURRENT_PHASE"
+else
+    banner
+    validate_target "$TARGET"
+    validate_mode "$MODE"
+    validate_ports "$PORTS_OVERRIDE"
+    validate_exclude_file "$EXCLUDE_FILE"
+    validate_mac "$MAC_SPOOF"
+    validate_baseline_dir "$BASELINE_DIR"
+    validate_webhook "$WEBHOOK_URL"
+    validate_keep_runs "$KEEP_RUNS"
+    validate_ttl "$TTL"
+    validate_proxy "$PROXY_URL"
+    [[ "$MODE" == "ctf" ]] && is_cidr "$TARGET" && \
+        die "ctf mode is single-target only (no host-discovery) — use normal|fast|stealth for CIDR/range targets"
+
+    # sizing tier for literal a.b.c.d/N targets only; ranges/lists unaffected
+    if cidr_pfx=$(cidr_prefix_len "$TARGET" 2>/dev/null); then
+        CHUNK_PREFIX="$cidr_pfx"
+        if [[ "$cidr_pfx" -le 8 && "$ALLOW_HUGE_SCOPE" != 1 ]]; then
+            die "target $TARGET is /$cidr_pfx or broader — refusing by default (pass --allow-huge-scope to override)"
+        fi
+        [[ "$cidr_pfx" -lt 16 ]] && CHUNK_MODE=1
+    fi
+
+    # this size looks like a mistyped octet; force an explicit interface choice
+    if [[ "$CHUNK_MODE" == 1 && -z "$INTERFACE" ]]; then
+        die "target $TARGET is broader than /16 — pass -e/--interface <name> to confirm which network you mean to scan. Available interfaces:
+$(list_interfaces)"
+    fi
+    if [[ -n "$INTERFACE" ]]; then
+        iface_cidr=$(ip -o -4 addr show dev "$INTERFACE" 2>/dev/null | awk '{print $4}' | head -n1) || true
+        if [[ -n "$iface_cidr" ]]; then
+            log "scanning via interface $INTERFACE ($iface_cidr)"
+        else
+            warn "interface $INTERFACE not found or has no IPv4 address — check spelling:
+$(list_interfaces)"
+        fi
+    fi
+
+    OUTDIR="${OUTDIR:-nigoh_${MODE}_$(date +%Y%m%d_%H%M%S)}"
+    validate_outdir "$OUTDIR"
+    if [[ "$CHUNK_MODE" == 1 ]]; then
+        mkdir -p "$OUTDIR"
+        CHUNK_LIST=$(cidr_to_24_chunks "$TARGET" | tr '\n' ' ') || true
+        CHUNK_LIST="${CHUNK_LIST% }"
+    else
+        mkdir -p "$OUTDIR"/{discovery,sweep,service,evasion,vuln,udp,os}
+    fi
+    PHASE_DISCOVERY_DONE=0; PHASE_SWEEP_DONE=0
+    SERVICE_DONE_HOSTS=""; EVASION_DONE_HOSTS=""; VULN_DONE_HOSTS=""
+    PHASE_UDP_DONE=0; PHASE_OS_DONE=0; PHASE_BADSUM_DONE=0
+    PHASE_DEFENSE_DONE=0; DEFENSE_DETECTED=""
+    PHASE_FWMAP_DONE=0; PHASE_OT_DONE=0
+    save_state
+    # a chunk child is not a user-tracked run; pruning shared history here
+    # would delete the still-running parent directory (chunks outnumber keep-runs)
+    if [[ "${NIGOH_CHUNK_CHILD:-0}" != 1 ]]; then
+        mkdir -p "$HIST_DIR"
+        printf '%s target=%s mode=%s outdir=%s\n' "$(date -u +%FT%TZ)" "$TARGET" "$MODE" "$(readlink -f "$OUTDIR")" >> "$HIST_DIR/history.log"
+    fi
+fi
+
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+
+trap on_interrupt INT TERM
+cd "$OUTDIR"
+
+EXCLUDE_ARGS=(); [[ -n "$EXCLUDE_FILE" ]] && EXCLUDE_ARGS=(--excludefile "$EXCLUDE_FILE")
+# fixed once per run (persisted) so stealth padding varies between runs but
+# stays consistent across phases and resumes within the same one
+[[ -z "$RAND_DATA_LEN" ]] && RAND_DATA_LEN=$(( RANDOM % 200 + 20 ))
+set_mode_params
+
+if [[ "${CHUNK_MODE:-0}" == 1 ]]; then
+    run_chunked_scan
+    cleanup_run
+    trap - INT TERM
+    log "done. chunked summary: $OUTDIR/SUMMARY.md"
+    exit 0
+fi
+
+# phase 1: host discovery (CIDR only)
+CURRENT_PHASE="discovery"
+if [[ "$PHASE_DISCOVERY_DONE" != 1 ]]; then
+    if is_cidr "$TARGET" && [[ "$MODE" != "ctf" ]]; then
+        log "phase1: host discovery ($MODE) on $TARGET"
+        run_nmap -n "${DISC_ARGS[@]}" "${EXCLUDE_ARGS[@]}" -oA discovery/ping "$TARGET" || true
+        grep 'Status: Up' discovery/ping.gnmap 2>/dev/null | awk '{print $2}' \
+            | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u > live_hosts.txt || true
+        [[ -s live_hosts.txt ]] || { warn "ping sweep found nothing, falling back to -Pn"; echo "$TARGET" > live_hosts.txt; }
+    else
+        echo "$TARGET" > live_hosts.txt
+    fi
+    PHASE_DISCOVERY_DONE=1
+    save_state; journal_append "phase: discovery"
+fi
+log "live targets: $(wc -l < live_hosts.txt)"
+
+# phase 1b: interactive host+mode pick (CIDR, no -m given)
+CURRENT_PHASE="pick"
+if [[ -z "$RESUME_DIR" ]] && is_cidr "$TARGET" && [[ "$MODE_EXPLICIT" != 1 ]]; then
+    mapfile -t PICK_HOSTS < live_hosts.txt
+    if [[ "${#PICK_HOSTS[@]}" -gt 1 ]]; then
+        warn "pick a host:"
+        i=1; for h in "${PICK_HOSTS[@]}"; do printf '  %d) %s\n' "$i" "$h" >&2; i=$((i+1)); done
+        read -rp "host #: " HOST_IDX
+        [[ "$HOST_IDX" =~ ^[0-9]+$ && "$HOST_IDX" -ge 1 && "$HOST_IDX" -le "${#PICK_HOSTS[@]}" ]] || die "bad host choice"
+        TARGET="${PICK_HOSTS[$((HOST_IDX-1))]}"
+    else
+        TARGET="${PICK_HOSTS[0]}"
+    fi
+    warn "pick a mode:"
+    printf '  1) ctf\n  2) normal\n  3) fast\n  4) stealth\n' >&2
+    read -rp "mode #: " MODE_IDX
+    case "$MODE_IDX" in
+        1) MODE=ctf ;; 2) MODE=normal ;; 3) MODE=fast ;; 4) MODE=stealth ;;
+        *) die "bad mode choice" ;;
+    esac
+    echo "$TARGET" > live_hosts.txt
+    set_mode_params
+    log "picked host=$TARGET mode=$MODE"
+fi
+
+# phase 1c: adaptive defense probe (skip in stealth — already max-caution)
+CURRENT_PHASE="defense_probe"
+if [[ "$MODE" != "stealth" ]]; then
+    if [[ "$PHASE_DEFENSE_DONE" != 1 ]]; then
+        probe_defense "$(head -n1 live_hosts.txt)"
+        PHASE_DEFENSE_DONE=1
+        save_state; journal_append "phase: defense_probe detected=$DEFENSE_DETECTED"
+    fi
+    if [[ "$DEFENSE_DETECTED" == 1 ]]; then
+        throttle_for_defense SWEEP_ARGS
+        throttle_for_defense SERVICE_ARGS
+        COOLDOWN=$(( COOLDOWN * 2 ))
+    elif [[ "$DEFENSE_DETECTED" == 0 ]]; then
+        boost_for_no_defense SWEEP_ARGS
+        boost_for_no_defense SERVICE_ARGS
+        COOLDOWN=$(( COOLDOWN / 2 ))
+    fi
+fi
+
+# phase 1d: firewall policy map via ACK/Window/Maimon differential (opt-in)
+CURRENT_PHASE="fwmap"
+if [[ "$DO_FWMAP" == 1 && "$PHASE_FWMAP_DONE" != 1 ]]; then
+    fwports="${PORTS_OVERRIDE:-1-1000}"
+    log "phase1d: firewall policy map (ACK/Window/Maimon) on ports $fwports"
+    run_nmap -sA -Pn -p"$fwports" -iL live_hosts.txt -oA discovery/fwmap_ack || true
+    run_nmap -sW -Pn -p"$fwports" -iL live_hosts.txt -oA discovery/fwmap_window || true
+    run_nmap -sM -Pn -p"$fwports" -iL live_hosts.txt -oA discovery/fwmap_maimon || true
+    PHASE_FWMAP_DONE=1
+    save_state; journal_append "phase: fwmap"
+fi
+
+# phase 1e: ICS/OT-aware discovery (opt-in)
+CURRENT_PHASE="ot"
+if [[ "$DO_OT" == 1 && "$PHASE_OT_DONE" != 1 ]]; then
+    log "phase1e: OT/ICS discovery (Modbus/S7/BACnet, ultra-slow single-protocol probes)"
+    run_nmap -Pn -p502,102,20000,47808 --script "modbus-discover,s7-info,bacnet-info" \
+             --scan-delay 500ms --max-parallelism 1 -T2 \
+             -iL live_hosts.txt -oA discovery/ot_probe || true
+    PHASE_OT_DONE=1
+    save_state; journal_append "phase: ot"
+fi
+
+# opt-in scan-shape overrides (apply after adaptive tuning, before sweep)
+if [[ -n "$IDLE_ZOMBIE" ]]; then
+    log "idle/zombie scan via $IDLE_ZOMBIE — this host never talks to the target directly"
+    apply_idle_zombie SWEEP_ARGS "$IDLE_ZOMBIE"
+fi
+if [[ "$PARANOID" == 1 ]]; then
+    log "paranoid: forcing -T0 timing and a 60s+ floor cooldown"
+    force_paranoid_timing SWEEP_ARGS
+    force_paranoid_timing SERVICE_ARGS
+    [[ "$COOLDOWN" -lt 60 ]] && COOLDOWN=60
+fi
+if [[ -n "$PROXY_URL" ]]; then
+    log "proxy chaining via $PROXY_URL — forcing TCP connect scan (required for proxy support)"
+    apply_connect_scan SWEEP_ARGS
+    SWEEP_ARGS+=(--proxies "$PROXY_URL")
+    SERVICE_ARGS+=(--proxies "$PROXY_URL")
+fi
+# a single merged --script list; nmap only honors the last --script flag
+# given, so --cve and --sec-headers must not each append their own
+EXTRA_SCRIPTS=""
+if [[ "$DO_CVE" == 1 ]]; then
+    if nmap --script-help vulners >/dev/null 2>&1; then
+        EXTRA_SCRIPTS="${EXTRA_SCRIPTS:+$EXTRA_SCRIPTS,}vulners"
+    elif nmap --script-help vulscan >/dev/null 2>&1; then
+        EXTRA_SCRIPTS="${EXTRA_SCRIPTS:+$EXTRA_SCRIPTS,}vulscan"
+    else
+        warn "--cve requested but no vulners/vulscan NSE script installed, skipping CVE lookup"
+    fi
+fi
+[[ "$DO_SECHEADERS" == 1 ]] && EXTRA_SCRIPTS="${EXTRA_SCRIPTS:+$EXTRA_SCRIPTS,}http-security-headers"
+[[ -n "$EXTRA_SCRIPTS" ]] && SERVICE_ARGS+=(--script "$EXTRA_SCRIPTS")
+
+# phase 2: full TCP SYN sweep (all live targets, one invocation)
+CURRENT_PHASE="sweep"
+if [[ -n "$PORTS_OVERRIDE" ]]; then
+    log "phase2: skipped (--ports override: $PORTS_OVERRIDE)"
+elif [[ "$PHASE_SWEEP_DONE" != 1 ]]; then
+    if [[ "$USE_MASSCAN" == 1 ]] && command -v masscan >/dev/null 2>&1; then
+        log "phase2a: masscan seed pass"
+        sudo masscan -p1-65535 -iL live_hosts.txt --rate "$MASSCAN_RATE" -oL sweep/masscan.lst || true
+    fi
+    log "phase2: full TCP SYN sweep ($MODE)"
+    run_nmap "${SWEEP_ARGS[@]}" "${EXCLUDE_ARGS[@]}" -iL live_hosts.txt -oA sweep/tcp_full || true
+    PHASE_SWEEP_DONE=1
+    save_state; journal_append "phase: sweep"
+fi
+
+# phase 2b: diff against a prior run (opt-in change detection)
+CURRENT_PHASE="diff"
+if [[ -n "$BASELINE_DIR" ]]; then
+    if [[ ! -f "$BASELINE_DIR/sweep/tcp_full.xml" || ! -f sweep/tcp_full.xml ]]; then
+        warn "--diff: missing sweep/tcp_full.xml in baseline or current run, skipping"
+    elif ! command -v ndiff >/dev/null 2>&1; then
+        warn "--diff: ndiff not found (ships with nmap), skipping"
+    else
+        log "phase2b: diff against baseline $BASELINE_DIR"
+        ndiff "$BASELINE_DIR/sweep/tcp_full.xml" sweep/tcp_full.xml > sweep/diff_report.txt 2>&1 || true
+        log "diff report: $OUTDIR/sweep/diff_report.txt"
+    fi
+fi
+
+# phase 3: per-host targeted service/version/script scan
+CURRENT_PHASE="service"
+[[ "$PHASE_SWEEP_DONE" == 1 && -z "$PORTS_OVERRIDE" ]] && cooldown "$COOLDOWN"
+while read -r host; do
+    [[ -z "$host" ]] && continue
+    host_in_list "$SERVICE_DONE_HOSTS" "$host" && continue
+    ports="${PORTS_OVERRIDE:-$(open_ports_for "$host")}"
+    if [[ -z "$ports" ]]; then
+        warn "no open ports for $host, skipping service scan"
+        mark_host_done SERVICE_DONE_HOSTS "$host"
+        continue
+    fi
+    log "phase3: service scan $host ports=$ports"
+    run_nmap "${SERVICE_ARGS[@]}" -Pn -p"$ports" -oA "service/$host" "$host" || true
+    if all_ports_filtered "service/$host.nmap"; then
+        warn "$host: all ports filtered (sweep already proved them open) — likely IDS/rate-limit block, backing off 30s and retrying once"
+        sleep 30
+        run_nmap "${SERVICE_ARGS[@]}" -Pn -p"$ports" -oA "service/$host" "$host" || true
+        all_ports_filtered "service/$host.nmap" && warn "$host: still filtered after retry — block may outlast this run, re-run service scan later with: nmap ${SERVICE_ARGS[*]} -Pn -p$ports $host"
+    fi
+    mark_host_done SERVICE_DONE_HOSTS "$host"
+    journal_append "phase: service $host"
+done < live_hosts.txt
+
+# phase 4: layered evasion pass (stealth mode)
+CURRENT_PHASE="evasion"
+if [[ "$EVASION_ON" == 1 ]]; then
+    while read -r host; do
+        [[ -z "$host" ]] && continue
+        host_in_list "$EVASION_DONE_HOSTS" "$host" && continue
+        ports="${PORTS_OVERRIDE:-$(open_ports_for "$host")}"
+        [[ -z "$ports" ]] && ports="1-1024"
+        log "phase4: evasion pass $host"
+        run_nmap -sS -Pn -p"$ports" -f --data-length "$RAND_DATA_LEN" -D RND:8,ME --source-port 53 \
+                 --scan-delay 300ms --max-parallelism 1 --max-retries 1 -T2 \
+                 -oA "evasion/$host" "$host" || true
+        mark_host_done EVASION_DONE_HOSTS "$host"
+        journal_append "phase: evasion $host"
+    done < live_hosts.txt
+fi
+
+# phase 5: safe vuln NSE (opt-in, rate-capped, timeout-capped)
+CURRENT_PHASE="vuln"
+if [[ "$DO_VULN" == 1 ]]; then
+    while read -r host; do
+        [[ -z "$host" ]] && continue
+        host_in_list "$VULN_DONE_HOSTS" "$host" && continue
+        ports="${PORTS_OVERRIDE:-$(open_ports_for "$host")}"
+        [[ -z "$ports" ]] && { mark_host_done VULN_DONE_HOSTS "$host"; continue; }
+        log "phase5: safe vuln NSE $host"
+        run_nmap -Pn -p"$ports" --script "vuln and safe" \
+                  --script-timeout 2m --max-rate 300 -oA "vuln/$host" "$host" || true
+        mark_host_done VULN_DONE_HOSTS "$host"
+        journal_append "phase: vuln $host"
+    done < live_hosts.txt
+fi
+
+# phase 6: UDP top ports (opt-in)
+CURRENT_PHASE="udp"
+if [[ "$DO_UDP" == 1 && "$PHASE_UDP_DONE" != 1 ]]; then
+    log "phase6: top-200 UDP sweep"
+    run_nmap -sU -Pn --top-ports 200 --min-rate 1000 --max-retries 1 -T4 \
+              -iL live_hosts.txt -oA udp/top200 || true
+    PHASE_UDP_DONE=1
+    save_state; journal_append "phase: udp"
+fi
+
+# phase 7: OS fingerprint + path
+CURRENT_PHASE="os"
+if [[ "${#OS_ARGS[@]}" -gt 0 && "$PHASE_OS_DONE" != 1 ]]; then
+    cooldown "$COOLDOWN"
+    log "phase7: OS + traceroute"
+    run_nmap "${OS_ARGS[@]}" --traceroute -Pn -iL live_hosts.txt -oA os/os_trace || true
+    PHASE_OS_DONE=1
+    save_state; journal_append "phase: os"
+fi
+
+# phase 7b: recursive pivot expansion (opt-in, depth-capped at 1)
+CURRENT_PHASE="pivot"
+if [[ "$RECURSE_PIVOT" == 1 && "${NIGOH_PIVOT_DEPTH:-0}" -lt 1 && -f os/os_trace.nmap ]]; then
+    mapfile -t KNOWN_NETS < <(sed 's/\.[0-9]*$/.0\/24/' live_hosts.txt | sort -u)
+    mapfile -t PIVOTS < <(detect_pivot_subnets os/os_trace.nmap)
+    for net in "${PIVOTS[@]}"; do
+        printf '%s\n' "${KNOWN_NETS[@]}" | grep -qxF "$net" && continue
+        warn "pivot: scanning newly discovered range $net"
+        slug=$(echo "$net" | tr '/.' '__')
+        NIGOH_PIVOT_DEPTH=1 "$0" -t "$net" -m "$MODE" -o "pivot_$slug" --recurse-pivot || true
+        break
+    done
+fi
+
+# phase 8: badsum diagnostic (opt-in)
+CURRENT_PHASE="badsum"
+if [[ "$DO_BADSUM" == 1 && "$PHASE_BADSUM_DONE" != 1 ]]; then
+    log "phase8: badsum diagnostic"
+    run_nmap -Pn --badsum -p80,443 -iL live_hosts.txt -oA sweep/badsum || true
+    PHASE_BADSUM_DONE=1
+    save_state; journal_append "phase: badsum"
+fi
+
+# phase 9: consolidated report
+CURRENT_PHASE="report"
+{
+    echo "# nigoh summary — mode=$MODE target=$TARGET"
+    echo
+    for f in service/*.nmap; do
+        [[ -e "$f" ]] || continue
+        echo "## $(basename "${f%.nmap}")"
+        grep -E '^[0-9]+/(tcp|udp)' "$f" || true
+        echo
+    done
+    if [[ "$DO_CVE" == 1 ]]; then
+        echo "## Risk summary (CVE matches from NSE)"
+        cves=$(grep -hoE 'CVE-[0-9]{4}-[0-9]+' service/*.nmap 2>/dev/null | sort -u) || true
+        [[ -n "$cves" ]] && echo "$cves" || echo "(none found)"
+        echo
+    fi
+    if [[ "$DO_SECHEADERS" == 1 ]]; then
+        echo "## HTTP security headers found"
+        for f in service/*.nmap; do
+            [[ -e "$f" ]] || continue
+            hdrs=$(awk '/^\| http-security-headers:/{f=1} f{ if ($0 !~ /^\|/) exit; print }' "$f")
+            [[ -n "$hdrs" ]] && { echo "### $(basename "${f%.nmap}")"; echo "$hdrs"; echo; }
+        done
+    fi
+} > SUMMARY.md
+save_state; journal_append "phase: report (run complete)"
+
+CURRENT_PHASE="webhook"
+if [[ -n "$WEBHOOK_URL" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+        log "delivering summary to webhook"
+        if curl -fsS -X POST -H 'Content-Type: text/plain' --data-binary @SUMMARY.md "$WEBHOOK_URL" >/dev/null 2>&1; then
+            log "webhook delivered"
+        else
+            warn "webhook POST failed"
+        fi
+    else
+        warn "--webhook requested but curl not found, skipping"
+    fi
+fi
+
+cleanup_run
+trap - INT TERM
+
+log "done. summary: $OUTDIR/SUMMARY.md"
+find . -name '*.nmap' | sort
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

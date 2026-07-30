@@ -1,0 +1,13 @@
+# nigoh run output
+nigoh_*_*/
+pivot_*/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# editor/IDE
+.vscode/
+.idea/
+*.swp
+*~

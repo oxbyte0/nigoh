@@ -1,0 +1,48 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck & syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: bash -n nigoh
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: style
+          check_together: 'yes'
+
+      - name: Install yq (config file support)
+        run: sudo apt-get update && sudo apt-get install -y yq
+
+      - name: Dry-run smoke test
+        run: |
+          chmod +x nigoh
+          NIGOH_DRYRUN=1 NIGOH_NO_BANNER=1 ./nigoh -t 10.0.0.1 -m ctf -o /tmp/nigoh-ci-test
+          NIGOH_DRYRUN=1 NIGOH_NO_BANNER=1 ./nigoh -t 10.0.0.1 -m ctf -o /tmp/nigoh-ci-test-2 \
+            --paranoid --firewall-map --ot --cve --udp --badsum-test --ttl 64 --sec-headers
+
+      - name: Chunked-scan smoke test (broader-than-/16 target, exercises flag forwarding)
+        run: |
+          NIGOH_DRYRUN=1 NIGOH_DRYRUN_SLEEP=0.02 timeout 10 ./nigoh -t 10.50.0.0/15 -m normal \
+            -o /tmp/nigoh-ci-chunk -e lo -q --cve || [ $? -eq 124 ]
+
+      - name: Config-file smoke test
+        run: |
+          for f in examples/*.yaml; do
+            NIGOH_DRYRUN=1 timeout 5 ./nigoh --config "$f" -e lo -o /tmp/nigoh-ci-cfg -q \
+              || [ $? -eq 124 ]
+            rm -rf /tmp/nigoh-ci-cfg
+          done

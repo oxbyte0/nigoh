@@ -1,0 +1,23 @@
+# nigoh — CTF / HTB profile
+#
+# Single known-up box, you want in fast, and you don't care about being
+# noisy. This is what nigoh's `ctf` mode is built for: no discovery phase,
+# full-rate sweep, deep service/OS fingerprinting.
+#
+# Usage: cp this to ./nigoh.yaml in your working directory, edit `target`,
+# and just run `nigoh`. Or point at it directly: nigoh --config ctf.yaml
+
+target: 10.10.11.5             # <-- change this
+mode: ctf
+
+# CVE matching is cheap and CTF boxes love outdated software versions —
+# worth leaving on by default here.
+cve: true
+
+# Skip these unless the box specifically needs them — they cost time:
+udp: false                     # only if you suspect a UDP-only service (SNMP, DNS, TFTP)
+vuln: false                    # nmap's vuln-category NSE scripts, broader and slower than --cve
+
+# If the box starts rate-limiting you (filtered ports that were open a
+# minute ago), stop and re-run with paranoid: true instead of guessing.
+paranoid: false

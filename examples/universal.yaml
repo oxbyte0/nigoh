@@ -1,0 +1,31 @@
+# nigoh — universal / balanced profile
+#
+# You don't know the environment yet: could be a quiet lab, could be a
+# monitored corp segment, could be one host or a whole subnet. This is the
+# "reasonable default for literally anything" profile — closest to just
+# running nigoh with no flags at all, made explicit so it's easy to tweak
+# from a known-good baseline instead of a blank page.
+#
+# `normal` mode already does the right thing here: layered discovery,
+# confirmation, moderated sweep — and the adaptive defense probe (phase1c)
+# handles the "is anything watching" question automatically, so you don't
+# have to pre-commit to paranoid or aggressive up front.
+
+target: 10.10.20.0/24          # <-- change this; works for a single host too
+mode: normal
+
+# Broaden coverage a little without going all-in — a fair middle ground
+# for a first pass against something unfamiliar.
+udp: true
+cve: true
+vuln: false                    # leave for a deliberate deeper pass, not the first look
+
+# --keep-runs and --diff are useful once you start re-running this
+# periodically against the same environment:
+keep_runs: 20
+# diff: nigoh_normal_20260701_120000    # compare against a prior run
+
+# If the first run's adaptive probe reports active inspection, don't
+# fight it — just add paranoid: true and re-run rather than overriding
+# the probe's own judgment.
+paranoid: false
